@@ -1,8 +1,6 @@
 import os
 import json
 import streamlit as st
-import firebase_admin
-from firebase_admin import credentials, firestore
 # Import the progress service to track student quiz completions
 from progress_service import get_quizzes_completed, get_average_score, get_improvement_rate
 # Import the formatting utility for quiz context
@@ -103,12 +101,24 @@ sys.path.extend(
         os.path.join(BASE, "1.2_back_end"),
         os.path.join(BASE, "1.3_models"),
         os.path.join(BASE, "1.4_agent2_quiz"),
+        os.path.join(BASE, "1.5_security"),
     ]
 )
 
 from document_loader import load_and_embed_pdf
 from quiz_extractor import extract_questions_from_pdf
 from quiz_agent import QuizAgent
+from config_validator import validate_runtime
+from system_safety import initialise_firestore_or_stop
+
+# Validate required local/cloud configuration before external services are used.
+startup_validation = validate_runtime(require_firebase=True)
+for warning in startup_validation.warnings:
+    st.warning(warning)
+if not startup_validation.ok:
+    for error in startup_validation.errors:
+        st.error(error)
+    st.stop()
 
 # Compatibility helper: some Streamlit versions expose experimental_rerun, others only have rerun
 def safe_rerun():
@@ -138,11 +148,8 @@ required_dirs = [
 for d in required_dirs:
     os.makedirs(os.path.join(BASE, d), exist_ok=True)
 
-# Initialize Firebase Admin SDK
-if not firebase_admin._apps:
-    cred = credentials.Certificate(dict(st.secrets["FIREBASE"]))
-    firebase_admin.initialize_app(cred)
-db = firestore.client()
+# Initialize Firebase through the central safety net so raw exceptions stay hidden.
+db = initialise_firestore_or_stop(st)
 def load_student_performance():
     """Load all student performance records from Firestore."""
     performance = []

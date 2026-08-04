@@ -1,37 +1,76 @@
-# quick_test.py   ── place in project root (genai_its/)
-"""
-One‑shot smoke‑test for whichever LLM provider is active.
+"""Manual smoke test for the configured CyberNexa LLM provider.
 
-• Relies on   1.3_models/llm_provider.py
-• Works with either provider ('groq' or 'hf') without edits.
+Run manually from the project root:
+
+    python 1.3_models/quick_test.py
+
+The test is protected by a main guard so pytest can import this file
+without sending a real LLM request.
 """
 
-import os, sys, pathlib
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "1.3_models"))
-# --- ensure 1.3_models is importable -----------------------------
-ROOT = pathlib.Path(__file__).resolve().parent
-MODELS_DIR = ROOT / "1.3_models"
+from __future__ import annotations
+
+import pathlib
+import sys
+from typing import Any
+
+
+MODELS_DIR = pathlib.Path(__file__).resolve().parent
+
 if str(MODELS_DIR) not in sys.path:
     sys.path.insert(0, str(MODELS_DIR))
 
-from llm_provider import get_llm  # your file – unchanged
+from llm_provider import get_llm
 
-# -----------------------------------------------------------------
-# Helper: figure out which backend we actually got
-def _detect_backend(llm) -> str:
-    cls = llm.__class__.__name__.lower()
-    if "groq" in cls:
+
+def _unwrap_llm(llm: Any) -> Any:
+    """Return the underlying provider when governance wraps the model."""
+    return getattr(llm, "_llm", llm)
+
+
+def _detect_backend(llm: Any) -> str:
+    """Return a readable provider name."""
+    raw_llm = _unwrap_llm(llm)
+    class_name = raw_llm.__class__.__name__.lower()
+
+    if "groq" in class_name:
         return "groq"
-    if "huggingface" in cls or "hf" in cls:
-        return "huggingface‑inference‑api"
-    return cls
 
-# -----------------------------------------------------------------
-llm   = get_llm()                 # uses $LLM_PROVIDER env‑var (falls back to groq)
-prov  = _detect_backend(llm)
+    if "ollama" in class_name:
+        return "ollama"
 
-print(f"✅ Provider resolved → {prov}  ({llm.__class__.__name__})")
-print("🔹 Sending test prompt…")
+    if "openai" in class_name:
+        return "openai"
 
-reply = get_llm().invoke("Quick test via quick_test.py")
-print(reply[:120])                 # reply is already a string
+    return class_name
+
+
+def _response_text(response: Any) -> str:
+    """Extract text from either a LangChain AIMessage or a plain string."""
+    content = getattr(response, "content", response)
+    return str(content)
+
+
+def main() -> int:
+    llm = get_llm()
+    provider = _detect_backend(llm)
+
+    print(
+        f"[OK] Provider resolved -> {provider} "
+        f"({llm.__class__.__name__})"
+    )
+    print("[INFO] Sending test prompt...")
+
+    response = llm.invoke("Reply with: CyberNexa provider test passed.")
+    text = _response_text(response)
+
+    if not text.strip():
+        print("[ERROR] The provider returned an empty response.")
+        return 1
+
+    print(text[:200])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

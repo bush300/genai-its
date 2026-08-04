@@ -1,0 +1,20 @@
+services:
+  blue:
+    env_file:
+      - ../.env
+    environment:
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+    volumes:
+      - ../.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  green:
+    env_file:
+      - ../.env
+    environment:
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+    volumes:
+      - ../.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

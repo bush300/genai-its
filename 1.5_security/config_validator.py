@@ -87,8 +87,8 @@ def validate_environment(config: Mapping[str, str | None], allow_placeholders: b
     result = ValidationResult()
     provider = str(config.get("LLM_PROVIDER", "groq")).strip().lower()
 
-    if provider not in {"groq", "ollama"}:
-        result.errors.append("LLM_PROVIDER must be either 'groq' or 'ollama'.")
+    if provider not in {"groq", "ollama", "openai"}:
+        result.errors.append("LLM_PROVIDER must be 'groq', 'ollama', or 'openai'.")
 
     if provider == "groq":
         api_key = config.get("GROQ_API_KEY")
@@ -97,6 +97,14 @@ def validate_environment(config: Mapping[str, str | None], allow_placeholders: b
         model = config.get("GROQ_MODEL")
         if not model or (not allow_placeholders and _is_placeholder(str(model))):
             result.errors.append("GROQ_MODEL is missing or still contains a placeholder.")
+
+    if provider == "openai":
+        api_key = config.get("OPENAI_API_KEY")
+        if not api_key or (not allow_placeholders and _is_placeholder(str(api_key))):
+            result.errors.append("OPENAI_API_KEY is missing or still contains a placeholder.")
+        model = config.get("OPENAI_MODEL")
+        if not model or (not allow_placeholders and _is_placeholder(str(model))):
+            result.errors.append("OPENAI_MODEL is missing or still contains a placeholder.")
 
     if provider == "ollama":
         model = config.get("OLLAMA_MODEL")

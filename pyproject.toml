@@ -2,3 +2,7 @@
 name = "genai-its-models"
 version = "0.0.1"
 packages = ["1.3_models"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
