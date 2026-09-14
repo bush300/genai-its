@@ -27,7 +27,7 @@ firebase-admin
 # Add any other dependencies below as needed
 langchain-ollama
 langchain-openai
-google-generativeai
+google-genai
 
 # Explicit constraints to fix CI/CD dependency resolution
 grpcio==1.64.1

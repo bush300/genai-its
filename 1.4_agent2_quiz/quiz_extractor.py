@@ -22,6 +22,19 @@ from llm_provider import get_llm
 
 from unstructured.partition.pdf import partition_pdf          # single import
 
+from middleware.input_sanitizer import InputSanitizer
+
+# Lazy singleton so importing this module doesn't require a configured API key
+# (e.g. under pytest) until a PDF is actually parsed.
+_sanitizer = None
+
+
+def _get_sanitizer() -> InputSanitizer:
+    global _sanitizer
+    if _sanitizer is None:
+        _sanitizer = InputSanitizer()
+    return _sanitizer
+
 # ── Tunables ────────────────────────────────────────────────────────────
 MAX_CHARS      = 24_000                # ≈ 7 200 tokens
 OCR_LANGUAGES  = ["eng"]            # use only English for maximum compatibility
@@ -205,7 +218,14 @@ def _pdf_to_text(path: str) -> str:
 
     # ASCII-clean + truncate
     embedded_txt = re.sub(r"[^\x00-\x7F]+", " ", embedded_txt)
-    return embedded_txt[:MAX_CHARS]
+    embedded_txt = embedded_txt[:MAX_CHARS]
+
+    # Security gate: block injected/malicious PDF content before it reaches the RAG system.
+    is_safe, reason = _get_sanitizer().check_secondary_gate(embedded_txt)
+    if not is_safe:
+        raise RuntimeError(f"Security check failed for PDF content: {reason}")
+
+    return embedded_txt
 
 
 def _image_to_text(path: str) -> str:

@@ -1881,6 +1881,16 @@ Type your answer below. The AI tutor will provide feedback and guide you to the 
                         chat_history
                     )
 
+                # 4. POST-INFERENCE DETECTIVE CONTROL (Canary Token check)
+                from middleware.input_sanitizer import contains_canary_leak
+                if contains_canary_leak(response):
+                    st.error(
+                        "🚨 **Data Exfiltration Detected**\n\n"
+                        "The AI response contained a confidential internal marker. "
+                        "This session has been halted for review."
+                    )
+                    st.stop()
+
             # Move to post-quiz survey when the quiz finishes
             if end_quiz == "qualtrics2":
                 chat_history.append(

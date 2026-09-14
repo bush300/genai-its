@@ -58,7 +58,7 @@ source .venv/bin/activate
 ```bash
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-Troubleshooting: If you encounter a version conflict or error while installing the requirements, manually install the Gemini SDK first by running python -m pip install google-generativeai
+Troubleshooting: If you encounter a version conflict or error while installing the requirements, manually install the Gemini SDK first by running python -m pip install google-genai
 
 ---
 
