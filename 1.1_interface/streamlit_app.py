@@ -266,7 +266,10 @@ def set_query_params():
         'week': st.session_state.get('student_week', ''),
         'student_id': st.session_state.get('student_id', '')
     })
-
+login_button = False
+username = ""
+password = ""
+role = "Student"
 if st.session_state.page == 'main':
     st.sidebar.empty()
 
@@ -436,7 +439,7 @@ font-size:14px;
 line-height:1.6;
 margin:0 0 26px 0;
 ">
-Choose your role to enter the secure learning platform.
+Login to enter the secure learning platform.
 </p>
 
 </div>
@@ -444,31 +447,28 @@ Choose your role to enter the secure learning platform.
                 unsafe_allow_html=True
             )
 
-            btn_student = st.button(
-                "🎓 Continue as Student",
-                key="student_btn",
-                help="Open the student learning portal",
-                use_container_width=True
+            username = st.text_input(
+                "Email or Username",
+                placeholder="Enter your email or username",
+                key="login_username"
             )
 
-            st.markdown(
-                """
-<div style="
-text-align:center;
-color:#6F89A7;
-font-size:12px;
-margin:8px 0;
-">
-OR
-</div>
-""",
-                unsafe_allow_html=True
+            password = st.text_input(
+                "Password",
+                type="password",
+                placeholder="Enter your password",
+                key="login_password"
             )
 
-            btn_teacher = st.button(
-                "👩‍🏫 Continue as Teacher",
-                key="teacher_btn",
-                help="Open quiz management and analytics",
+            role = st.selectbox(
+                "Login as",
+                ["Student", "Teacher"],
+                key="login_role"
+            )
+
+            login_button = st.button(
+                "🔐 Login",
+                key="login_button",
                 use_container_width=True
             )
 
@@ -501,14 +501,17 @@ CyberNexa • Secure AI-Powered Education
 """,
                 unsafe_allow_html=True
             )
+    if login_button and (not username.strip() or not password.strip()):
+        st.error("Please enter your username and password.")
 
-    if btn_teacher:
-        st.session_state.page = 'teacher'
+    if login_button and username.strip() and password.strip() and role == "Student":
+        st.session_state.page = "student_login"
         set_query_params()
         st.rerun()
 
-    if btn_student:
-        st.session_state.page = 'student_login'
+    if login_button and username.strip() and password.strip() and role == "Teacher":
+        st.session_state.teacher_id = username.strip()
+        st.session_state.page = "teacher"
         set_query_params()
         st.rerun()
 
