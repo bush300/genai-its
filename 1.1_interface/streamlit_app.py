@@ -111,12 +111,14 @@ sys.path.extend(
         os.path.join(BASE, "1.2_back_end"),
         os.path.join(BASE, "1.3_models"),
         os.path.join(BASE, "1.4_agent2_quiz"),
+        os.path.join(BASE, "1.5_security"),
     ]
 )
 
 from document_loader import load_and_embed_pdf
 from quiz_extractor import extract_questions_from_pdf
 from quiz_agent import QuizAgent
+from audit_logger import AuditLogger
 
 # Compatibility helper: some Streamlit versions expose experimental_rerun, others only have rerun
 def safe_rerun():
@@ -151,6 +153,12 @@ if not firebase_admin._apps:
     cred = credentials.Certificate(dict(st.secrets["FIREBASE"]))
     firebase_admin.initialize_app(cred)
 db = firestore.client()
+
+security_audit_logger = AuditLogger(
+    firestore_client=db,
+    firestore_collection="audit_logs",
+)
+
 def load_student_performance():
     """Load all student performance records from Firestore."""
     performance = []
@@ -170,6 +178,36 @@ def load_student_performance():
         performance.append(data)
 
     return performance
+
+
+def load_security_events():
+    """Load security-relevant audit events from Firestore."""
+    security_event_types = {
+        "input_sanitisation_flag",
+        "output_guardrail_trigger",
+        "rate_limit_hit",
+        "contract_violation",
+        "rbac_check",
+    }
+
+    events = []
+
+    for doc in db.collection("audit_logs").stream():
+        data = doc.to_dict() or {}
+
+        if data.get("event_type") not in security_event_types:
+            continue
+
+        data["document_id"] = doc.id
+        events.append(data)
+
+    events.sort(
+        key=lambda event: event.get("timestamp", ""),
+        reverse=True,
+    )
+
+    return events
+
 
 def save_quiz_to_firestore(subject, week, questions):
     doc_id = f"{subject}_{week}"
@@ -522,7 +560,9 @@ if st.session_state.page == 'teacher':
         st.rerun()
 
     # Teacher navigation
-    nav_col1, nav_col2, nav_col3 = st.columns([1, 1, 0.75])
+    nav_col1, nav_col2, nav_col3, nav_col4 = st.columns(
+        [1, 1, 1, 0.75]
+    )
 
     with nav_col1:
         st.button(
@@ -543,6 +583,16 @@ if st.session_state.page == 'teacher':
             st.rerun()
 
     with nav_col3:
+        if st.button(
+            "🛡️ Security Events",
+            key="teacher_hub_to_security",
+            use_container_width=True
+        ):
+            st.session_state.page = "teacher_security"
+            set_query_params()
+            st.rerun()
+
+    with nav_col4:
         if st.button(
             "🚪 Log Out",
             key="teacher_logout",
@@ -980,7 +1030,9 @@ elif st.session_state.page == 'teacher_analytics':
     st.sidebar.empty()
 
     # Teacher analytics navigation
-    nav_col1, nav_col2, nav_col3 = st.columns([1, 1, 0.75])
+    nav_col1, nav_col2, nav_col3, nav_col4 = st.columns(
+        [1, 1, 1, 0.75]
+    )
 
     with nav_col1:
         if st.button(
@@ -1001,6 +1053,16 @@ elif st.session_state.page == 'teacher_analytics':
         )
 
     with nav_col3:
+        if st.button(
+            "🛡️ Security Events",
+            key="analytics_to_security",
+            use_container_width=True
+        ):
+            st.session_state.page = "teacher_security"
+            set_query_params()
+            st.rerun()
+
+    with nav_col4:
         if st.button(
             "🚪 Log Out",
             key="analytics_logout",
@@ -1213,6 +1275,211 @@ elif st.session_state.page == 'teacher_analytics':
             )
 
     st.stop()
+elif st.session_state.page == 'teacher_security':
+    st.sidebar.empty()
+
+    # Teacher security navigation
+    nav_col1, nav_col2, nav_col3, nav_col4 = st.columns(
+        [1, 1, 1, 0.75]
+    )
+
+    with nav_col1:
+        if st.button(
+            "🏠 Teacher Hub",
+            key="security_to_teacher_hub",
+            use_container_width=True
+        ):
+            st.session_state.page = "teacher"
+            set_query_params()
+            st.rerun()
+
+    with nav_col2:
+        if st.button(
+            "📊 Analytics & Reports",
+            key="security_to_analytics",
+            use_container_width=True
+        ):
+            st.session_state.page = "teacher_analytics"
+            set_query_params()
+            st.rerun()
+
+    with nav_col3:
+        st.button(
+            "🛡️ Security Events",
+            key="current_teacher_security",
+            disabled=True,
+            use_container_width=True
+        )
+
+    with nav_col4:
+        if st.button(
+            "🚪 Log Out",
+            key="security_logout",
+            use_container_width=True
+        ):
+            st.session_state.pop("teacher_id", None)
+            st.session_state.page = "main"
+            set_query_params()
+            st.rerun()
+
+    logo_path = os.path.join(
+        os.path.dirname(__file__),
+        "assets",
+        "cybernexa_logo.png"
+    )
+
+    st.image(logo_path, width=180)
+
+    st.title("🛡️ Security Events")
+
+    st.caption(
+        "Review security-related activity recorded by CyberNexa's audit system."
+    )
+
+    st.markdown("---")
+
+    security_events = load_security_events()
+
+    total_events = len(security_events)
+
+    blocked_inputs = sum(
+        1
+        for event in security_events
+        if event.get("event_type") == "input_sanitisation_flag"
+    )
+
+    rate_limit_events = sum(
+        1
+        for event in security_events
+        if event.get("event_type") == "rate_limit_hit"
+    )
+
+    high_severity_events = sum(
+        1
+        for event in security_events
+        if event.get("severity") in {"ERROR", "CRITICAL"}
+    )
+
+    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+
+    with metric_col1:
+        st.metric(
+            "Security Events",
+            total_events
+        )
+
+    with metric_col2:
+        st.metric(
+            "Blocked Inputs",
+            blocked_inputs
+        )
+
+    with metric_col3:
+        st.metric(
+            "Rate Limit Events",
+            rate_limit_events
+        )
+
+    with metric_col4:
+        st.metric(
+            "High Severity",
+            high_severity_events
+        )
+
+    st.markdown("---")
+
+    if not security_events:
+        st.info(
+            "No security events have been recorded in Firestore yet."
+        )
+
+    else:
+        import pandas as pd
+
+        event_rows = []
+
+        for event in security_events:
+            metadata = event.get("metadata") or {}
+
+            timestamp = event.get("timestamp", "")
+
+            if timestamp:
+                display_time = (
+                    timestamp
+                    .replace("T", " ")
+                    .replace("+00:00", " UTC")
+                )
+            else:
+                display_time = "Unknown"
+
+            security_layer = metadata.get(
+                "security_layer"
+            )
+
+            if not security_layer:
+                security_layer = event.get(
+                    "source_module",
+                    "Unknown"
+                )
+
+            event_rows.append({
+                "Time": display_time,
+                "User": event.get("user_id") or "Unknown",
+                "Event Type": event.get("event_type") or "Unknown",
+                "Severity": event.get("severity") or "Unknown",
+                "Layer": security_layer,
+                "Subject": metadata.get("subject") or "—",
+                "Week": metadata.get("week") or "—",
+                "Message": event.get("message") or "",
+            })
+
+        events_df = pd.DataFrame(event_rows)
+
+        st.subheader("Recorded Security Activity")
+
+        selected_types = st.multiselect(
+            "Filter by event type",
+            sorted(events_df["Event Type"].unique()),
+            default=sorted(events_df["Event Type"].unique()),
+        )
+
+        if selected_types:
+            filtered_df = events_df[
+                events_df["Event Type"].isin(selected_types)
+            ]
+        else:
+            filtered_df = events_df.iloc[0:0]
+
+        st.dataframe(
+            filtered_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.markdown("---")
+
+        st.subheader("Security Event Overview")
+
+        event_counts = (
+            events_df["Event Type"]
+            .value_counts()
+            .rename_axis("Event Type")
+            .reset_index(name="Events")
+            .set_index("Event Type")
+        )
+
+        st.bar_chart(
+            event_counts,
+            use_container_width=True,
+        )
+
+        st.caption(
+            "Raw prompts, rubrics, answer keys and authentication "
+            "secrets are intentionally excluded from this view."
+        )
+
+    st.stop()
+
 elif st.session_state.page == 'student_login':
     st.sidebar.empty()
 
@@ -1832,6 +2099,31 @@ Type your answer below. The AI tutor will provide feedback and guide you to the 
             is_safe, reason = sanitizer.check_secondary_gate(raw_user_input)
 
             if not is_safe:
+                # Identify which security layer stopped the request.
+                if reason.startswith("Blocked by static filter"):
+                    security_layer = "static_filter"
+                    audit_severity = "WARNING"
+                elif reason.startswith("Security check unavailable"):
+                    security_layer = "secondary_gate_unavailable"
+                    audit_severity = "ERROR"
+                else:
+                    security_layer = "secondary_gate"
+                    audit_severity = "WARNING"
+
+                # Record the block without storing the raw student prompt.
+                security_audit_logger.log_event(
+                    event_type="input_sanitisation_flag",
+                    message="Unsafe student input was blocked before reaching the tutor model.",
+                    severity=audit_severity,
+                    user_id=st.session_state.get("student_id"),
+                    source_module="streamlit_app",
+                    metadata={
+                        "subject": subject,
+                        "week": week,
+                        "security_layer": security_layer,
+                    },
+                )
+
                 # 2. TRIGGER RED BANNER GOVERNANCE
                 st.error(
                     f"🚨 **Security Policy Violation**\n\n"
@@ -1841,7 +2133,15 @@ Type your answer below. The AI tutor will provide feedback and guide you to the 
                 st.stop()  # Prevents execution from reaching line 1918 where 'response' is referenced
             else:
                 # 3. APPLY XML BOUNDING & CONTINUE
-                bounded_input = sanitizer.apply_xml_prompt_bounding(raw_user_input)
+                # Navigation commands must remain literal so QuizAgent can recognise them.
+                control_phrases = {
+                    "next", "continue", "yes", "ready", "okay", "yep",
+                    "quit", "exit", "stop", "finish"
+                }
+                if raw_user_input.strip().lower() in control_phrases:
+                    bounded_input = raw_user_input
+                else:
+                    bounded_input = sanitizer.apply_xml_prompt_bounding(raw_user_input)
 
                 # Allow student to leave using the word quit
                 if raw_user_input.strip().lower() == "quit":
