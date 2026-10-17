@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   security-and-tests:
-    name: Configuration, syntax and tests
+    name: Configuration, syntax, tests and coverage
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -32,7 +32,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-          python -m pip install pytest
+          python -m pip install pytest pytest-cov
 
       - name: Validate example configuration
         run: python 1.5_security/config_validator.py --check-example
@@ -46,8 +46,24 @@ jobs:
             1.4_agent2_quiz \
             1.5_security
 
-      - name: Run all automated tests
-        run: python -m pytest tests -v
+      - name: Run automated tests with coverage
+        run: |
+          python -m pytest tests -v \
+            --cov=1.1_interface \
+            --cov=1.2_back_end \
+            --cov=1.3_models \
+            --cov=1.4_agent2_quiz \
+            --cov=1.5_security \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cybernexa-coverage-report
+          path: coverage.xml
+          if-no-files-found: warn
 
       - name: Check for tracked private configuration
         shell: bash
