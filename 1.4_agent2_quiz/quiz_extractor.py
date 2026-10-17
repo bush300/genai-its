@@ -20,6 +20,7 @@ import os, json, re, textwrap, shutil, warnings, copy, time
 import streamlit as st
 from llm_provider import get_llm as _get_governed_llm
 from rate_limiter import RateLimitExceeded   # importable once llm_provider has set up sys.path
+from file_validator import SUPPORTED_EXTENSIONS, validate_upload   # same (1.5_security/)
 
 from unstructured.partition.pdf import partition_pdf          # single import
 
@@ -228,14 +229,10 @@ RUBRIC_PROMPT = textwrap.dedent("""\
 # ── Helpers ────────────────────────────────────────────────────────────
 _MD_FENCE = re.compile(r"```.*?```", re.S)
 _JSON_RE  = re.compile(r"(\[.*?\]|\{.*?\})", re.S)
-_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"}
-_TEXT_EXTENSIONS = {
-    ".txt", ".md", ".py", ".js", ".ts", ".java", ".c", ".cpp", ".cs",
-    ".html", ".css", ".json", ".yaml", ".yml", ".sh", ".bat", ".ps1", ".sql",
-}
 # Every type _source_to_text can handle. The "Upload Quiz File" widget in
-# streamlit_app.py reads this, so add new types to the sets above only.
-SUPPORTED_UPLOAD_EXTENSIONS = sorted({".pdf"} | _IMAGE_EXTENSIONS | _TEXT_EXTENSIONS)
+# streamlit_app.py reads this. To add a type, edit the extension sets in
+# 1.5_security/file_validator.py (and add a handler below if it's a new kind).
+SUPPORTED_UPLOAD_EXTENSIONS = sorted(SUPPORTED_EXTENSIONS)
 
 
 def _pdf_to_text(path: str) -> str:
@@ -316,15 +313,15 @@ def _text_file_to_text(path: str) -> str:
 
 
 def _source_to_text(path: str) -> str:
-    ext = Path(path).suffix.lower()
-    if ext == ".pdf":
+    # Check the file's actual content, not just its extension, before parsing.
+    # Raises FileValidationError if the content doesn't match the extension.
+    kind = validate_upload(Path(path).read_bytes(), Path(path).name)
+    if kind == "pdf":
         return _pdf_to_text(path)  # runs the security gate itself
-    if ext in _IMAGE_EXTENSIONS:
+    if kind == "image":
         text = _image_to_text(path)
-    elif ext in _TEXT_EXTENSIONS:
-        text = _text_file_to_text(path)
     else:
-        raise ValueError(f"Unsupported file type: {ext or 'unknown'}")
+        text = _text_file_to_text(path)
     _check_content_safe(text)
     return text
 

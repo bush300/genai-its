@@ -111,10 +111,12 @@ sys.path.extend(
         os.path.join(BASE, "1.2_back_end"),
         os.path.join(BASE, "1.3_models"),
         os.path.join(BASE, "1.4_agent2_quiz"),
+        os.path.join(BASE, "1.5_security"),
     ]
 )
 
 from document_loader import load_and_embed_pdf
+from file_validator import validate_upload
 from quiz_extractor import extract_questions_from_pdf
 from quiz_agent import QuizAgent
 
@@ -637,13 +639,18 @@ if st.session_state.page == 'teacher':
                     content_text = None
                     url = None
 
+                    # Decide how to process the file from its actual content, not its
+                    # extension or the browser-supplied MIME type (both can be faked).
+                    # Raises FileValidationError on a mismatch, shown by the handler below.
+                    kind = validate_upload(file_bytes, uploaded_kb.name)
+
                     # If text file, read content
-                    if uploaded_kb.name.lower().endswith('.txt') or (mimetype and 'text' in mimetype):
+                    if kind == "text":
                         progress.text("Parsing text file...")
                         content_text = file_bytes.decode('utf-8', errors='ignore')
 
                     # If PDF, save temporarily and extract text
-                    elif uploaded_kb.name.lower().endswith('.pdf'):
+                    elif kind == "pdf":
                         progress.text("Saving PDF and extracting text (this may take a moment)...")
                         temp_dir = os.path.join(BASE, 'data', 'uploaded_pdfs', 'kb', subject, week)
                         os.makedirs(temp_dir, exist_ok=True)
