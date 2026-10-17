@@ -16,13 +16,54 @@ Returned list item:
 from __future__ import annotations
 from pathlib import Path
 from typing import List, Dict
-import os, json, re, textwrap, shutil, warnings, copy
+import os, json, re, textwrap, shutil, warnings, copy, time
 import streamlit as st
-from llm_provider import get_llm
+from llm_provider import get_llm as _get_governed_llm
+from rate_limiter import RateLimitExceeded   # importable once llm_provider has set up sys.path
+from file_validator import SUPPORTED_EXTENSIONS, validate_upload   # same (1.5_security/)
 
 from unstructured.partition.pdf import partition_pdf          # single import
 
 from middleware.input_sanitizer import InputSanitizer
+
+# ── Rate-limit handling ─────────────────────────────────────────────────
+# Extracting N questions makes 1 + 2N LLM calls, which easily exceeds the
+# per-caller request window (default 10 calls / 60 s). Uploads therefore use
+# their own caller ID, so they don't consume the students' allowance, and
+# wait for the window to clear instead of failing part-way through.
+# DailyBudgetExceeded is deliberately NOT retried – that is a hard stop.
+EXTRACTOR_CALLER_ID = "quiz_extractor"
+RATE_LIMIT_MAX_RETRIES = 3
+
+
+class _RateLimitRetryLLM:
+    """Wraps a governed LLM and retries invoke() after a rate-limit wait."""
+
+    def __init__(self, llm):
+        self._llm = llm
+
+    def invoke(self, *args, **kwargs):
+        for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
+            try:
+                return self._llm.invoke(*args, **kwargs)
+            except RateLimitExceeded as exc:
+                if attempt == RATE_LIMIT_MAX_RETRIES:
+                    raise
+                # The limiter reports the wait only in its message:
+                # "... Please wait approximately N second(s) ..."
+                match = re.search(r"(\d+)\s*second", str(exc))
+                wait_seconds = int(match.group(1)) if match else 60
+                st.info(f"⏳ AI request limit reached – waiting {wait_seconds}s before continuing…")
+                time.sleep(wait_seconds)
+
+    def __getattr__(self, name):
+        return getattr(self._llm, name)
+
+
+def get_llm(**kwargs):
+    """Governed LLM for the upload pipeline (also used by the Re-run Pass 2/3 buttons)."""
+    kwargs.setdefault("caller_id", EXTRACTOR_CALLER_ID)
+    return _RateLimitRetryLLM(_get_governed_llm(**kwargs))
 
 # Lazy singleton so importing this module doesn't require a configured API key
 # (e.g. under pytest) until a PDF is actually parsed.
@@ -188,11 +229,10 @@ RUBRIC_PROMPT = textwrap.dedent("""\
 # ── Helpers ────────────────────────────────────────────────────────────
 _MD_FENCE = re.compile(r"```.*?```", re.S)
 _JSON_RE  = re.compile(r"(\[.*?\]|\{.*?\})", re.S)
-_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"}
-_TEXT_EXTENSIONS = {
-    ".txt", ".md", ".py", ".js", ".ts", ".java", ".c", ".cpp", ".cs",
-    ".html", ".css", ".json", ".yaml", ".yml", ".sh", ".bat", ".ps1", ".sql",
-}
+# Every type _source_to_text can handle. The "Upload Quiz File" widget in
+# streamlit_app.py reads this. To add a type, edit the extension sets in
+# 1.5_security/file_validator.py (and add a handler below if it's a new kind).
+SUPPORTED_UPLOAD_EXTENSIONS = sorted(SUPPORTED_EXTENSIONS)
 
 
 def _pdf_to_text(path: str) -> str:
@@ -220,12 +260,20 @@ def _pdf_to_text(path: str) -> str:
     embedded_txt = re.sub(r"[^\x00-\x7F]+", " ", embedded_txt)
     embedded_txt = embedded_txt[:MAX_CHARS]
 
-    # Security gate: block injected/malicious PDF content before it reaches the RAG system.
-    is_safe, reason = _get_sanitizer().check_secondary_gate(embedded_txt)
-    if not is_safe:
-        raise RuntimeError(f"Security check failed for PDF content: {reason}")
+    # Kept here (not only in _source_to_text) because the knowledgebase
+    # uploader in streamlit_app.py calls _pdf_to_text directly.
+    _check_content_safe(embedded_txt)
 
     return embedded_txt
+
+
+def _check_content_safe(text: str) -> None:
+    """Security gate: block injected/malicious uploaded content before it reaches the LLM."""
+    if not text.strip():
+        return  # nothing to check (e.g. OCR found no text)
+    is_safe, reason = _get_sanitizer().check_secondary_gate(text)
+    if not is_safe:
+        raise RuntimeError(f"Security check failed for uploaded content: {reason}")
 
 
 def _image_to_text(path: str) -> str:
@@ -265,14 +313,17 @@ def _text_file_to_text(path: str) -> str:
 
 
 def _source_to_text(path: str) -> str:
-    ext = Path(path).suffix.lower()
-    if ext == ".pdf":
-        return _pdf_to_text(path)
-    if ext in _IMAGE_EXTENSIONS:
-        return _image_to_text(path)
-    if ext in _TEXT_EXTENSIONS:
-        return _text_file_to_text(path)
-    raise ValueError(f"Unsupported file type: {ext or 'unknown'}")
+    # Check the file's actual content, not just its extension, before parsing.
+    # Raises FileValidationError if the content doesn't match the extension.
+    kind = validate_upload(Path(path).read_bytes(), Path(path).name)
+    if kind == "pdf":
+        return _pdf_to_text(path)  # runs the security gate itself
+    if kind == "image":
+        text = _image_to_text(path)
+    else:
+        text = _text_file_to_text(path)
+    _check_content_safe(text)
+    return text
 
 
 def _clean_json(raw: str) -> str:
@@ -455,6 +506,86 @@ def _wrap_python_code_blocks(text: str) -> str:
     return "\n".join(result)
 
 
+# ── Pass 2 / Pass 3 (shared) ───────────────────────────────────────────
+# Single source of truth for context enrichment and rubric generation.
+# Used by the initial extraction below AND by the "Re-run Pass 2/3" buttons
+# in streamlit_app.py, so changes here apply everywhere.
+
+def enrich_question_context(llm, question: str, context: str, source_text: str) -> str:
+    """Pass 2: return an enriched, answer-free context for one question.
+
+    `source_text` is the material to enrich from (the uploaded file's text,
+    or the knowledgebase text when re-running on an existing quiz).
+    """
+    enrich_prompt = ENRICH_PROMPT.format(
+        pdf_text=source_text,
+        question=question,
+        context=context,
+    )
+    enriched_context = llm.invoke(
+        [
+            {"role": "system", "content": "Return ONLY the enriched context as plain text. Do not add any preamble, conclusion, or any answer. Do NOT include any answer, solution, or worked example—just the context needed to answer the question. If the PDF contains an answer or solution, OMIT it from the context."},
+            {"role": "user", "content": enrich_prompt},
+        ],
+        temperature=0.2  # Slightly higher for more helpful completions
+    ).content
+    cleaned_context = clean_enriched_context(enriched_context)
+    # Remove any lines that look like an answer (e.g., start with 'Answer:', 'Solution:', 'Worked Example:', or are long and not code)
+    # BUT: Never remove lines labeled as 'Sample Output', 'Expected Output', or similar (these must be shown to students)
+    # Improved: Avoid context repetition and always include the original context at the top if not present
+    cleaned_context_lines = []
+    seen_lines = set()
+    # Always start with the original context if not empty
+    orig_context = (context or "").strip()
+    if orig_context:
+        for line in orig_context.splitlines():
+            l = line.strip()
+            if l and l not in seen_lines:
+                cleaned_context_lines.append(l)
+                seen_lines.add(l)
+    # Now add enriched lines, skipping duplicates and unwanted lines
+    for line in cleaned_context.splitlines():
+        lstr = line.strip().lower()
+        l = line.strip()
+        if not l or l in seen_lines:
+            continue
+        if lstr.startswith(("answer:", "solution:", "worked example:")):
+            continue  # skip these
+        if lstr.startswith(("the answer is", "in summary", "to solve this", "therefore", "thus", "correct answer", "final answer")):
+            continue  # skip these
+        if len(l.split()) > 8 and not any(x in l for x in ["=", ":", "print", "input", "for ", "while ", "if ", "def ", "class "]):
+            continue  # skip likely answer sentences
+        cleaned_context_lines.append(line)
+        seen_lines.add(l)
+    cleaned_context = "\n".join(cleaned_context_lines)
+    # If context is still too short, try to extract relevant lines from the source
+    if len(cleaned_context) < 40:
+        q_text = question[:40]
+        source_lines = source_text.splitlines()
+        relevant_lines = [line for line in source_lines if q_text.split()[0] in line or any(x in line for x in ["=", "print", ":", "+", "input", "output", "Sample Output", "Expected Output"])]
+        for line in relevant_lines[:6]:
+            l = line.strip()
+            if l and l not in seen_lines:
+                cleaned_context += "\n" + line
+                seen_lines.add(l)
+    return cleaned_context.strip()
+
+
+def generate_rubric(llm, question: str, context: str) -> str:
+    """Pass 3: return a plain-text marking rubric for one question."""
+    rubric_prompt = RUBRIC_PROMPT.format(
+        question=question,
+        context=context,
+    )
+    rubric_response = llm.invoke(
+        [
+            {"role": "system", "content": "Return the marking rubric as plain text."},
+            {"role": "user", "content": rubric_prompt},
+        ]
+    ).content
+    return rubric_response.strip()
+
+
 def _extract_questions_from_text(source_text: str) -> list[dict]:
     """
     Extract questions, enrich context, and generate rubrics from a source text blob using the LLM.
@@ -502,58 +633,7 @@ def _extract_questions_from_text(source_text: str) -> list[dict]:
     for idx, q in enumerate(questions, start=1):
         q.setdefault("id", idx)  # Ensure every question has an ID
         try:
-            enrich_prompt = ENRICH_PROMPT.format(
-                pdf_text=pdf_text,
-                question=q["question"],
-                context=q["context"],
-            )
-            enriched_context = llm.invoke(
-                [
-                    {"role": "system", "content": "Return ONLY the enriched context as plain text. Do not add any preamble, conclusion, or any answer. Do NOT include any answer, solution, or worked example—just the context needed to answer the question. If the PDF contains an answer or solution, OMIT it from the context."},
-                    {"role": "user", "content": enrich_prompt},
-                ],
-                temperature=0.2  # Slightly higher for more helpful completions
-            ).content
-            cleaned_context = clean_enriched_context(enriched_context)
-            # Remove any lines that look like an answer (e.g., start with 'Answer:', 'Solution:', 'Worked Example:', or are long and not code)
-            # BUT: Never remove lines labeled as 'Sample Output', 'Expected Output', or similar (these must be shown to students)
-            # Improved: Avoid context repetition and always include the original context at the top if not present
-            cleaned_context_lines = []
-            seen_lines = set()
-            # Always start with the original context if not empty
-            orig_context = q.get("context", "").strip()
-            if orig_context:
-                for line in orig_context.splitlines():
-                    l = line.strip()
-                    if l and l not in seen_lines:
-                        cleaned_context_lines.append(l)
-                        seen_lines.add(l)
-            # Now add enriched lines, skipping duplicates and unwanted lines
-            for line in cleaned_context.splitlines():
-                lstr = line.strip().lower()
-                l = line.strip()
-                if not l or l in seen_lines:
-                    continue
-                if lstr.startswith(("answer:", "solution:", "worked example:")):
-                    continue  # skip these
-                if lstr.startswith(("the answer is", "in summary", "to solve this", "therefore", "thus", "correct answer", "final answer")):
-                    continue  # skip these
-                if len(l.split()) > 8 and not any(x in l for x in ["=", ":", "print", "input", "for ", "while ", "if ", "def ", "class "]):
-                    continue  # skip likely answer sentences
-                cleaned_context_lines.append(line)
-                seen_lines.add(l)
-            cleaned_context = "\n".join(cleaned_context_lines)
-            # If context is still too short, try to extract relevant lines from PDF
-            if len(cleaned_context) < 40:
-                q_text = q["question"][:40]
-                pdf_lines = pdf_text.splitlines()
-                relevant_lines = [line for line in pdf_lines if q_text.split()[0] in line or any(x in line for x in ["=", "print", ":", "+", "input", "output", "Sample Output", "Expected Output"])]
-                for line in relevant_lines[:6]:
-                    l = line.strip()
-                    if l and l not in seen_lines:
-                        cleaned_context += "\n" + line
-                        seen_lines.add(l)
-            q["context"] = cleaned_context.strip()
+            q["context"] = enrich_question_context(llm, q["question"], q["context"], pdf_text)
             enriched_questions.append(q)
         except Exception as e:
             st.warning(f"⚠️ Error enriching context for Q{idx}: {e}")
@@ -563,17 +643,7 @@ def _extract_questions_from_text(source_text: str) -> list[dict]:
     # Pass-3: Generate rubrics
     for q in enriched_questions:
         try:
-            rubric_prompt = RUBRIC_PROMPT.format(
-                question=q["question"],
-                context=q["context"],
-            )
-            rubric_response = llm.invoke(
-                [
-                    {"role": "system", "content": "Return the marking rubric as plain text."},
-                    {"role": "user", "content": rubric_prompt},
-                ]
-            ).content
-            q["answer"] = rubric_response.strip()
+            q["answer"] = generate_rubric(llm, q["question"], q["context"])
         except Exception as e:
             st.warning(f"⚠️ Error generating rubric for Q{q['id']}: {e}")
             q["answer"] = "Rubric generation failed."
