@@ -16,13 +16,53 @@ Returned list item:
 from __future__ import annotations
 from pathlib import Path
 from typing import List, Dict
-import os, json, re, textwrap, shutil, warnings, copy
+import os, json, re, textwrap, shutil, warnings, copy, time
 import streamlit as st
-from llm_provider import get_llm
+from llm_provider import get_llm as _get_governed_llm
+from rate_limiter import RateLimitExceeded   # importable once llm_provider has set up sys.path
 
 from unstructured.partition.pdf import partition_pdf          # single import
 
 from middleware.input_sanitizer import InputSanitizer
+
+# ── Rate-limit handling ─────────────────────────────────────────────────
+# Extracting N questions makes 1 + 2N LLM calls, which easily exceeds the
+# per-caller request window (default 10 calls / 60 s). Uploads therefore use
+# their own caller ID, so they don't consume the students' allowance, and
+# wait for the window to clear instead of failing part-way through.
+# DailyBudgetExceeded is deliberately NOT retried – that is a hard stop.
+EXTRACTOR_CALLER_ID = "quiz_extractor"
+RATE_LIMIT_MAX_RETRIES = 3
+
+
+class _RateLimitRetryLLM:
+    """Wraps a governed LLM and retries invoke() after a rate-limit wait."""
+
+    def __init__(self, llm):
+        self._llm = llm
+
+    def invoke(self, *args, **kwargs):
+        for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
+            try:
+                return self._llm.invoke(*args, **kwargs)
+            except RateLimitExceeded as exc:
+                if attempt == RATE_LIMIT_MAX_RETRIES:
+                    raise
+                # The limiter reports the wait only in its message:
+                # "... Please wait approximately N second(s) ..."
+                match = re.search(r"(\d+)\s*second", str(exc))
+                wait_seconds = int(match.group(1)) if match else 60
+                st.info(f"⏳ AI request limit reached – waiting {wait_seconds}s before continuing…")
+                time.sleep(wait_seconds)
+
+    def __getattr__(self, name):
+        return getattr(self._llm, name)
+
+
+def get_llm(**kwargs):
+    """Governed LLM for the upload pipeline (also used by the Re-run Pass 2/3 buttons)."""
+    kwargs.setdefault("caller_id", EXTRACTOR_CALLER_ID)
+    return _RateLimitRetryLLM(_get_governed_llm(**kwargs))
 
 # Lazy singleton so importing this module doesn't require a configured API key
 # (e.g. under pytest) until a PDF is actually parsed.
@@ -220,12 +260,20 @@ def _pdf_to_text(path: str) -> str:
     embedded_txt = re.sub(r"[^\x00-\x7F]+", " ", embedded_txt)
     embedded_txt = embedded_txt[:MAX_CHARS]
 
-    # Security gate: block injected/malicious PDF content before it reaches the RAG system.
-    is_safe, reason = _get_sanitizer().check_secondary_gate(embedded_txt)
-    if not is_safe:
-        raise RuntimeError(f"Security check failed for PDF content: {reason}")
+    # Kept here (not only in _source_to_text) because the knowledgebase
+    # uploader in streamlit_app.py calls _pdf_to_text directly.
+    _check_content_safe(embedded_txt)
 
     return embedded_txt
+
+
+def _check_content_safe(text: str) -> None:
+    """Security gate: block injected/malicious uploaded content before it reaches the LLM."""
+    if not text.strip():
+        return  # nothing to check (e.g. OCR found no text)
+    is_safe, reason = _get_sanitizer().check_secondary_gate(text)
+    if not is_safe:
+        raise RuntimeError(f"Security check failed for uploaded content: {reason}")
 
 
 def _image_to_text(path: str) -> str:
@@ -267,12 +315,15 @@ def _text_file_to_text(path: str) -> str:
 def _source_to_text(path: str) -> str:
     ext = Path(path).suffix.lower()
     if ext == ".pdf":
-        return _pdf_to_text(path)
+        return _pdf_to_text(path)  # runs the security gate itself
     if ext in _IMAGE_EXTENSIONS:
-        return _image_to_text(path)
-    if ext in _TEXT_EXTENSIONS:
-        return _text_file_to_text(path)
-    raise ValueError(f"Unsupported file type: {ext or 'unknown'}")
+        text = _image_to_text(path)
+    elif ext in _TEXT_EXTENSIONS:
+        text = _text_file_to_text(path)
+    else:
+        raise ValueError(f"Unsupported file type: {ext or 'unknown'}")
+    _check_content_safe(text)
+    return text
 
 
 def _clean_json(raw: str) -> str:
