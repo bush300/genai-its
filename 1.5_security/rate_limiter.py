@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 import threading
 import time
 from collections import defaultdict, deque
@@ -452,8 +453,78 @@ def _extract_token_usage(
     return 0, 0
 
 
+# ---------------------------------------------------------------------------
+# FR14 - Egress controls and sensitive-data masking
+# ---------------------------------------------------------------------------
+
+_CLOUD_PROVIDERS = {
+    "groq",
+    "openai",
+}
+
+_EMAIL_PATTERN = re.compile(
+    r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+    re.IGNORECASE,
+)
+
+_STUDENT_ID_PATTERN = re.compile(
+    r"\b("
+    r"(?:student[\s_-]*id|student\s+number)"
+    r"\s*(?::|=|\bis\b)\s*"
+    r")"
+    r"([A-Za-z0-9][A-Za-z0-9_-]*)",
+    re.IGNORECASE,
+)
+
+
+def _mask_sensitive_text(text: str) -> str:
+    """Mask sensitive information before cloud LLM requests."""
+
+    masked = _EMAIL_PATTERN.sub(
+        "[REDACTED_EMAIL]",
+        text,
+    )
+
+    masked = _STUDENT_ID_PATTERN.sub(
+        lambda match: (
+            f"{match.group(1)}"
+            "[REDACTED_STUDENT_ID]"
+        ),
+        masked,
+    )
+
+    return masked
+
+
+def _mask_sensitive_request(value: Any) -> Any:
+    """Mask sensitive text while preserving common request structures."""
+
+    if isinstance(value, str):
+        return _mask_sensitive_text(value)
+
+    if isinstance(value, list):
+        return [
+            _mask_sensitive_request(item)
+            for item in value
+        ]
+
+    if isinstance(value, tuple):
+        return tuple(
+            _mask_sensitive_request(item)
+            for item in value
+        )
+
+    if isinstance(value, dict):
+        return {
+            key: _mask_sensitive_request(item)
+            for key, item in value.items()
+        }
+
+    return value
+
+
 class GovernedLLM:
-    """Proxy that applies request and cost governance."""
+    """Proxy that applies request, cost and egress governance."""
 
     def __init__(
         self,
@@ -472,7 +543,12 @@ class GovernedLLM:
             governor
             or _DEFAULT_GOVERNOR
         )
-        self._provider = provider
+
+        self._provider = (
+            str(provider)
+            .strip()
+            .lower()
+        )
 
         self._input_cost_per_million_usd = max(
             0.0,
@@ -548,15 +624,67 @@ class GovernedLLM:
             ),
         )
 
+    def _prepare_outbound_request(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> tuple[
+        tuple[Any, ...],
+        dict[str, Any],
+        Any,
+    ]:
+        """Prepare a request before it is sent to the provider."""
+
+        request = (
+            args[0]
+            if args
+            else kwargs.get("input")
+        )
+
+        outbound_args = args
+        outbound_kwargs = kwargs
+
+        if self._provider not in _CLOUD_PROVIDERS:
+            return (
+                outbound_args,
+                outbound_kwargs,
+                request,
+            )
+
+        masked_request = _mask_sensitive_request(
+            request
+        )
+
+        if args:
+            outbound_args = (
+                masked_request,
+                *args[1:],
+            )
+
+        elif "input" in kwargs:
+            outbound_kwargs = dict(kwargs)
+            outbound_kwargs["input"] = (
+                masked_request
+            )
+
+        return (
+            outbound_args,
+            outbound_kwargs,
+            request,
+        )
+
     def invoke(
         self,
         *args: Any,
         **kwargs: Any,
     ) -> Any:
-        request = (
-            args[0]
-            if args
-            else kwargs.get("input")
+        (
+            outbound_args,
+            outbound_kwargs,
+            request,
+        ) = self._prepare_outbound_request(
+            args,
+            kwargs,
         )
 
         self._governor.check_and_record(
@@ -570,9 +698,10 @@ class GovernedLLM:
 
         try:
             response = self._llm.invoke(
-                *args,
-                **kwargs,
+                *outbound_args,
+                **outbound_kwargs,
             )
+
         except Exception as exc:
             _audit_safely(
                 event_type="system_error",
@@ -611,10 +740,13 @@ class GovernedLLM:
         *args: Any,
         **kwargs: Any,
     ) -> Any:
-        request = (
-            args[0]
-            if args
-            else kwargs.get("input")
+        (
+            outbound_args,
+            outbound_kwargs,
+            request,
+        ) = self._prepare_outbound_request(
+            args,
+            kwargs,
         )
 
         self._governor.check_and_record(
@@ -628,9 +760,10 @@ class GovernedLLM:
 
         try:
             response = await self._llm.ainvoke(
-                *args,
-                **kwargs,
+                *outbound_args,
+                **outbound_kwargs,
             )
+
         except Exception as exc:
             _audit_safely(
                 event_type="system_error",
