@@ -233,6 +233,9 @@ _TEXT_EXTENSIONS = {
     ".txt", ".md", ".py", ".js", ".ts", ".java", ".c", ".cpp", ".cs",
     ".html", ".css", ".json", ".yaml", ".yml", ".sh", ".bat", ".ps1", ".sql",
 }
+# Every type _source_to_text can handle. The "Upload Quiz File" widget in
+# streamlit_app.py reads this, so add new types to the sets above only.
+SUPPORTED_UPLOAD_EXTENSIONS = sorted({".pdf"} | _IMAGE_EXTENSIONS | _TEXT_EXTENSIONS)
 
 
 def _pdf_to_text(path: str) -> str:
@@ -506,6 +509,86 @@ def _wrap_python_code_blocks(text: str) -> str:
     return "\n".join(result)
 
 
+# ── Pass 2 / Pass 3 (shared) ───────────────────────────────────────────
+# Single source of truth for context enrichment and rubric generation.
+# Used by the initial extraction below AND by the "Re-run Pass 2/3" buttons
+# in streamlit_app.py, so changes here apply everywhere.
+
+def enrich_question_context(llm, question: str, context: str, source_text: str) -> str:
+    """Pass 2: return an enriched, answer-free context for one question.
+
+    `source_text` is the material to enrich from (the uploaded file's text,
+    or the knowledgebase text when re-running on an existing quiz).
+    """
+    enrich_prompt = ENRICH_PROMPT.format(
+        pdf_text=source_text,
+        question=question,
+        context=context,
+    )
+    enriched_context = llm.invoke(
+        [
+            {"role": "system", "content": "Return ONLY the enriched context as plain text. Do not add any preamble, conclusion, or any answer. Do NOT include any answer, solution, or worked example—just the context needed to answer the question. If the PDF contains an answer or solution, OMIT it from the context."},
+            {"role": "user", "content": enrich_prompt},
+        ],
+        temperature=0.2  # Slightly higher for more helpful completions
+    ).content
+    cleaned_context = clean_enriched_context(enriched_context)
+    # Remove any lines that look like an answer (e.g., start with 'Answer:', 'Solution:', 'Worked Example:', or are long and not code)
+    # BUT: Never remove lines labeled as 'Sample Output', 'Expected Output', or similar (these must be shown to students)
+    # Improved: Avoid context repetition and always include the original context at the top if not present
+    cleaned_context_lines = []
+    seen_lines = set()
+    # Always start with the original context if not empty
+    orig_context = (context or "").strip()
+    if orig_context:
+        for line in orig_context.splitlines():
+            l = line.strip()
+            if l and l not in seen_lines:
+                cleaned_context_lines.append(l)
+                seen_lines.add(l)
+    # Now add enriched lines, skipping duplicates and unwanted lines
+    for line in cleaned_context.splitlines():
+        lstr = line.strip().lower()
+        l = line.strip()
+        if not l or l in seen_lines:
+            continue
+        if lstr.startswith(("answer:", "solution:", "worked example:")):
+            continue  # skip these
+        if lstr.startswith(("the answer is", "in summary", "to solve this", "therefore", "thus", "correct answer", "final answer")):
+            continue  # skip these
+        if len(l.split()) > 8 and not any(x in l for x in ["=", ":", "print", "input", "for ", "while ", "if ", "def ", "class "]):
+            continue  # skip likely answer sentences
+        cleaned_context_lines.append(line)
+        seen_lines.add(l)
+    cleaned_context = "\n".join(cleaned_context_lines)
+    # If context is still too short, try to extract relevant lines from the source
+    if len(cleaned_context) < 40:
+        q_text = question[:40]
+        source_lines = source_text.splitlines()
+        relevant_lines = [line for line in source_lines if q_text.split()[0] in line or any(x in line for x in ["=", "print", ":", "+", "input", "output", "Sample Output", "Expected Output"])]
+        for line in relevant_lines[:6]:
+            l = line.strip()
+            if l and l not in seen_lines:
+                cleaned_context += "\n" + line
+                seen_lines.add(l)
+    return cleaned_context.strip()
+
+
+def generate_rubric(llm, question: str, context: str) -> str:
+    """Pass 3: return a plain-text marking rubric for one question."""
+    rubric_prompt = RUBRIC_PROMPT.format(
+        question=question,
+        context=context,
+    )
+    rubric_response = llm.invoke(
+        [
+            {"role": "system", "content": "Return the marking rubric as plain text."},
+            {"role": "user", "content": rubric_prompt},
+        ]
+    ).content
+    return rubric_response.strip()
+
+
 def _extract_questions_from_text(source_text: str) -> list[dict]:
     """
     Extract questions, enrich context, and generate rubrics from a source text blob using the LLM.
@@ -553,58 +636,7 @@ def _extract_questions_from_text(source_text: str) -> list[dict]:
     for idx, q in enumerate(questions, start=1):
         q.setdefault("id", idx)  # Ensure every question has an ID
         try:
-            enrich_prompt = ENRICH_PROMPT.format(
-                pdf_text=pdf_text,
-                question=q["question"],
-                context=q["context"],
-            )
-            enriched_context = llm.invoke(
-                [
-                    {"role": "system", "content": "Return ONLY the enriched context as plain text. Do not add any preamble, conclusion, or any answer. Do NOT include any answer, solution, or worked example—just the context needed to answer the question. If the PDF contains an answer or solution, OMIT it from the context."},
-                    {"role": "user", "content": enrich_prompt},
-                ],
-                temperature=0.2  # Slightly higher for more helpful completions
-            ).content
-            cleaned_context = clean_enriched_context(enriched_context)
-            # Remove any lines that look like an answer (e.g., start with 'Answer:', 'Solution:', 'Worked Example:', or are long and not code)
-            # BUT: Never remove lines labeled as 'Sample Output', 'Expected Output', or similar (these must be shown to students)
-            # Improved: Avoid context repetition and always include the original context at the top if not present
-            cleaned_context_lines = []
-            seen_lines = set()
-            # Always start with the original context if not empty
-            orig_context = q.get("context", "").strip()
-            if orig_context:
-                for line in orig_context.splitlines():
-                    l = line.strip()
-                    if l and l not in seen_lines:
-                        cleaned_context_lines.append(l)
-                        seen_lines.add(l)
-            # Now add enriched lines, skipping duplicates and unwanted lines
-            for line in cleaned_context.splitlines():
-                lstr = line.strip().lower()
-                l = line.strip()
-                if not l or l in seen_lines:
-                    continue
-                if lstr.startswith(("answer:", "solution:", "worked example:")):
-                    continue  # skip these
-                if lstr.startswith(("the answer is", "in summary", "to solve this", "therefore", "thus", "correct answer", "final answer")):
-                    continue  # skip these
-                if len(l.split()) > 8 and not any(x in l for x in ["=", ":", "print", "input", "for ", "while ", "if ", "def ", "class "]):
-                    continue  # skip likely answer sentences
-                cleaned_context_lines.append(line)
-                seen_lines.add(l)
-            cleaned_context = "\n".join(cleaned_context_lines)
-            # If context is still too short, try to extract relevant lines from PDF
-            if len(cleaned_context) < 40:
-                q_text = q["question"][:40]
-                pdf_lines = pdf_text.splitlines()
-                relevant_lines = [line for line in pdf_lines if q_text.split()[0] in line or any(x in line for x in ["=", "print", ":", "+", "input", "output", "Sample Output", "Expected Output"])]
-                for line in relevant_lines[:6]:
-                    l = line.strip()
-                    if l and l not in seen_lines:
-                        cleaned_context += "\n" + line
-                        seen_lines.add(l)
-            q["context"] = cleaned_context.strip()
+            q["context"] = enrich_question_context(llm, q["question"], q["context"], pdf_text)
             enriched_questions.append(q)
         except Exception as e:
             st.warning(f"⚠️ Error enriching context for Q{idx}: {e}")
@@ -614,17 +646,7 @@ def _extract_questions_from_text(source_text: str) -> list[dict]:
     # Pass-3: Generate rubrics
     for q in enriched_questions:
         try:
-            rubric_prompt = RUBRIC_PROMPT.format(
-                question=q["question"],
-                context=q["context"],
-            )
-            rubric_response = llm.invoke(
-                [
-                    {"role": "system", "content": "Return the marking rubric as plain text."},
-                    {"role": "user", "content": rubric_prompt},
-                ]
-            ).content
-            q["answer"] = rubric_response.strip()
+            q["answer"] = generate_rubric(llm, q["question"], q["context"])
         except Exception as e:
             st.warning(f"⚠️ Error generating rubric for Q{q['id']}: {e}")
             q["answer"] = "Rubric generation failed."
