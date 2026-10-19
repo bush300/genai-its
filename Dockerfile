@@ -14,6 +14,14 @@ COPY requirements.txt .
 RUN python -m pip install --upgrade pip \
     && python -m pip install -r requirements.txt
 
+# Runtime libraries required by OpenCV inside the slim Linux image.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        libxcb1 \
+        libgl1 \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY . .
 
 EXPOSE 8501
