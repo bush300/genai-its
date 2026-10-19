@@ -26,7 +26,7 @@ from rate_limiter import (  # noqa: E402
 
 
 class FakeLLM:
-    """Fake model that does not contact Groq or Ollama."""
+    """Fake model that does not contact a real LLM provider."""
 
     def invoke(self, message):
         return f"received: {message}"
@@ -368,7 +368,9 @@ def test_failed_async_llm_call_creates_system_error_event(
 
     class FailingAsyncLLM:
         async def ainvoke(self, message):
-            raise ConnectionError("Async provider unavailable")
+            raise ConnectionError(
+                "Async provider unavailable"
+            )
 
     governor = UsageGovernor(
         GovernanceConfig(
@@ -401,3 +403,164 @@ def test_failed_async_llm_call_creates_system_error_event(
         "operation": "ainvoke",
         "error_type": "ConnectionError",
     }
+
+
+# ---------------------------------------------------------------------------
+# FR14 - Egress controls and sensitive-data masking tests
+# ---------------------------------------------------------------------------
+
+
+def test_groq_masks_email_and_student_id():
+    governor = UsageGovernor(
+        GovernanceConfig(
+            enabled=False,
+            requests=10,
+            window_seconds=60,
+            daily_request_limit=100,
+        )
+    )
+
+    llm = GovernedLLM(
+        FakeLLM(),
+        caller_id="groq-mask-test",
+        governor=governor,
+        provider="groq",
+    )
+
+    result = llm.invoke(
+        "Contact saad@example.com "
+        "for student ID: saad_123"
+    )
+
+    assert (
+        result
+        == "received: Contact [REDACTED_EMAIL] "
+        "for student ID: [REDACTED_STUDENT_ID]"
+    )
+
+    assert "saad@example.com" not in result
+    assert "saad_123" not in result
+
+
+def test_openai_masks_structured_message_content():
+    governor = UsageGovernor(
+        GovernanceConfig(
+            enabled=False,
+            requests=10,
+            window_seconds=60,
+            daily_request_limit=100,
+        )
+    )
+
+    llm = GovernedLLM(
+        FakeLLM(),
+        caller_id="openai-mask-test",
+        governor=governor,
+        provider="openai",
+    )
+
+    request = [
+        {
+            "role": "system",
+            "content": (
+                "Student email is test@example.com "
+                "and student_id=abc_456"
+            ),
+        }
+    ]
+
+    result = llm.invoke(request)
+
+    assert "[REDACTED_EMAIL]" in result
+    assert "[REDACTED_STUDENT_ID]" in result
+    assert "test@example.com" not in result
+    assert "abc_456" not in result
+
+
+def test_ollama_keeps_sensitive_request_unchanged():
+    governor = UsageGovernor(
+        GovernanceConfig(
+            enabled=False,
+            requests=10,
+            window_seconds=60,
+            daily_request_limit=100,
+        )
+    )
+
+    llm = GovernedLLM(
+        FakeLLM(),
+        caller_id="ollama-mask-test",
+        governor=governor,
+        provider="ollama",
+    )
+
+    original = (
+        "Contact saad@example.com "
+        "for student ID: saad_123"
+    )
+
+    result = llm.invoke(original)
+
+    assert result == f"received: {original}"
+    assert "saad@example.com" in result
+    assert "saad_123" in result
+
+
+def test_cloud_provider_does_not_mask_normal_text():
+    governor = UsageGovernor(
+        GovernanceConfig(
+            enabled=False,
+            requests=10,
+            window_seconds=60,
+            daily_request_limit=100,
+        )
+    )
+
+    llm = GovernedLLM(
+        FakeLLM(),
+        caller_id="normal-text-test",
+        governor=governor,
+        provider="groq",
+    )
+
+    original = (
+        "Explain student performance for week2"
+    )
+
+    result = llm.invoke(original)
+
+    assert result == f"received: {original}"
+
+
+def test_async_cloud_request_masks_sensitive_data():
+    class AsyncFakeLLM:
+        async def ainvoke(self, message):
+            return f"received: {message}"
+
+    governor = UsageGovernor(
+        GovernanceConfig(
+            enabled=False,
+            requests=10,
+            window_seconds=60,
+            daily_request_limit=100,
+        )
+    )
+
+    llm = GovernedLLM(
+        AsyncFakeLLM(),
+        caller_id="async-mask-test",
+        governor=governor,
+        provider="groq",
+    )
+
+    result = asyncio.run(
+        llm.ainvoke(
+            "Email: async@example.com "
+            "student number: async_789"
+        )
+    )
+
+    assert "[REDACTED_EMAIL]" in result
+    assert "[REDACTED_STUDENT_ID]" in result
+    assert "async@example.com" not in result
+    assert "async_789" not in result
