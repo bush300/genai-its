@@ -111,10 +111,12 @@ sys.path.extend(
         os.path.join(BASE, "1.2_back_end"),
         os.path.join(BASE, "1.3_models"),
         os.path.join(BASE, "1.4_agent2_quiz"),
+        os.path.join(BASE, "1.5_security"),
     ]
 )
 
 from document_loader import load_and_embed_pdf
+from file_validator import validate_upload
 from quiz_extractor import extract_questions_from_pdf
 from quiz_agent import QuizAgent
 
@@ -637,13 +639,18 @@ if st.session_state.page == 'teacher':
                     content_text = None
                     url = None
 
+                    # Decide how to process the file from its actual content, not its
+                    # extension or the browser-supplied MIME type (both can be faked).
+                    # Raises FileValidationError on a mismatch, shown by the handler below.
+                    kind = validate_upload(file_bytes, uploaded_kb.name)
+
                     # If text file, read content
-                    if uploaded_kb.name.lower().endswith('.txt') or (mimetype and 'text' in mimetype):
+                    if kind == "text":
                         progress.text("Parsing text file...")
                         content_text = file_bytes.decode('utf-8', errors='ignore')
 
                     # If PDF, save temporarily and extract text
-                    elif uploaded_kb.name.lower().endswith('.pdf'):
+                    elif kind == "pdf":
                         progress.text("Saving PDF and extracting text (this may take a moment)...")
                         temp_dir = os.path.join(BASE, 'data', 'uploaded_pdfs', 'kb', subject, week)
                         os.makedirs(temp_dir, exist_ok=True)
@@ -761,23 +768,7 @@ if st.session_state.page == 'teacher':
                     question_txt = _current_value(q_key, q.get('question', ''))
                     context_txt  = _current_value(c_key, q.get('context', ''))
                     try:
-                        enrich_prompt = quiz_extractor.ENRICH_PROMPT.format(
-                            pdf_text=(kb_text or ""),
-                            question=question_txt,
-                            context=context_txt,
-                        )
-                        enriched_context = llm.invoke(
-                            [
-                                {"role": "system", "content": "Return ONLY the enriched context as plain text. Do not add any preamble or conclusion. Do NOT include any answer."},
-                                {"role": "user", "content": enrich_prompt},
-                            ],
-                            temperature=0.2,
-                        ).content
-                        cleaned = quiz_extractor.clean_enriched_context(enriched_context)
-                        # If enrichment is too short, append a few KB lines heuristically
-                        if len(cleaned) < 40 and kb_text:
-                            kb_lines = [ln for ln in kb_text.splitlines() if ln.strip()][:8]
-                            cleaned = (cleaned + "\n" + "\n".join(kb_lines)).strip()
+                        cleaned = quiz_extractor.enrich_question_context(llm, question_txt, context_txt, kb_text or "")
                         # Update text area value via session_state, then the UI will reflect after rerun
                         st.session_state[c_key] = cleaned
                         updated += 1
@@ -802,17 +793,7 @@ if st.session_state.page == 'teacher':
                     question_txt = _current_value(q_key, q.get('question', ''))
                     context_txt  = _current_value(c_key, q.get('context', ''))
                     try:
-                        rubric_prompt = quiz_extractor.RUBRIC_PROMPT.format(
-                            question=question_txt,
-                            context=context_txt,
-                        )
-                        rubric = llm.invoke(
-                            [
-                                {"role": "system", "content": "Return the marking rubric as plain text."},
-                                {"role": "user", "content": rubric_prompt},
-                            ]
-                        ).content
-                        st.session_state[r_key] = rubric.strip()
+                        st.session_state[r_key] = quiz_extractor.generate_rubric(llm, question_txt, context_txt)
                         updated += 1
                     except Exception as e:
                         st.warning(f"⚠️ Pass-3 failed for Q{qid}: {e}")
@@ -873,9 +854,11 @@ if st.session_state.page == 'teacher':
         st.info("Upload a new quiz PDF to create a new quiz.")
         new_subject = st.text_input("Enter Subject Name (e.g. COMP801)", key="new_subject")
         new_week = st.text_input("Enter Week (e.g. Week 1)", key="new_week")
+        import quiz_extractor
         uploaded_file = st.file_uploader(
             "Upload Quiz File",
-            type=["pdf", "png", "jpg", "jpeg", "gif", "webp", "txt", "py", "js", "ts", "java", "c", "cpp", "cs", "html", "css", "json", "yaml", "yml", "md", "sh", "bat", "ps1", "sql"],
+            # Accepted types come from the extractor, so the two can't drift apart
+            type=[ext.lstrip(".") for ext in quiz_extractor.SUPPORTED_UPLOAD_EXTENSIONS],
             key="new_quiz_file",
         )
         if new_subject and new_week and uploaded_file:
@@ -884,7 +867,6 @@ if st.session_state.page == 'teacher':
             os.makedirs(os.path.dirname(temp_file_path), exist_ok=True)
             with open(temp_file_path, "wb") as f:
                 f.write(uploaded_file.read())
-            import quiz_extractor
             # Only run extraction if not already done for this PDF
             if 'uploaded_file_name' not in st.session_state or st.session_state.uploaded_file_name != uploaded_file.name:
                 with st.spinner("Extracting questions from file (Pass 1)..."):
@@ -904,30 +886,12 @@ if st.session_state.page == 'teacher':
                     with st.spinner("Re-enriching context for all questions (Pass 2)..."):
                         enriched_questions = []
                         llm = quiz_extractor.get_llm()
-                        pdf_text = quiz_extractor._pdf_to_text(temp_pdf_path)
+                        # Works for every upload type (PDF, image, text/code) and re-runs the security gate
+                        source_text = quiz_extractor._source_to_text(temp_file_path)
                         for idx, q in enumerate(st.session_state.uploaded_questions, start=1):
                             q.setdefault("id", idx)
                             try:
-                                enrich_prompt = quiz_extractor.ENRICH_PROMPT.format(
-                                    pdf_text=pdf_text,
-                                    question=q["question"],
-                                    context=q["context"],
-                                )
-                                enriched_context = llm.invoke(
-                                    [
-                                        {"role": "system", "content": "Return ONLY the enriched context as plain text. Do not add any preamble or conclusion."},
-                                        {"role": "user", "content": enrich_prompt},
-                                    ],
-                                    temperature=0.2
-                                ).content
-                                cleaned_context = quiz_extractor.clean_enriched_context(enriched_context)
-                                if len(cleaned_context) < 40 or cleaned_context.lower().startswith("the question is asking"):
-                                    q_text = q["question"][:40]
-                                    pdf_lines = pdf_text.splitlines()
-                                    relevant_lines = [line for line in pdf_lines if q_text.split()[0] in line or any(x in line for x in ["=", "print", ":", "+", "input", "output"])]
-                                    if relevant_lines:
-                                        cleaned_context += "\n" + "\n".join(relevant_lines[:6])
-                                q["context"] = cleaned_context.strip()
+                                q["context"] = quiz_extractor.enrich_question_context(llm, q["question"], q["context"], source_text)
                             except Exception as e:
                                 st.warning(f"⚠️ Error enriching context for Q{idx}: {e}")
                             enriched_questions.append(q)
@@ -939,17 +903,7 @@ if st.session_state.page == 'teacher':
                         llm = quiz_extractor.get_llm()
                         for q in st.session_state.uploaded_questions:
                             try:
-                                rubric_prompt = quiz_extractor.RUBRIC_PROMPT.format(
-                                    question=q["question"],
-                                    context=q["context"],
-                                )
-                                rubric_response = llm.invoke(
-                                    [
-                                        {"role": "system", "content": "Return the marking rubric as plain text."},
-                                        {"role": "user", "content": rubric_prompt},
-                                    ]
-                                ).content
-                                q["answer"] = rubric_response.strip()
+                                q["answer"] = quiz_extractor.generate_rubric(llm, q["question"], q["context"])
                             except Exception as e:
                                 st.warning(f"⚠️ Error generating rubric for Q{q.get('id','')}: {e}")
                                 q["answer"] = "Rubric generation failed."
