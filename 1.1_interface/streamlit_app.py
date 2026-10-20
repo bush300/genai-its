@@ -2,6 +2,7 @@ import os
 import json
 import streamlit as st
 import firebase_admin
+import bcrypt
 from firebase_admin import credentials, firestore
 # Import the progress service to track student quiz completions
 from progress_service import get_quizzes_completed, get_average_score, get_improvement_rate
@@ -246,11 +247,19 @@ def load_knowledgebase_from_firestore(subject, week):
 # Main entry page: login/role selection
 if 'page' not in st.session_state:
     st.session_state.page = 'main'
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
 
-# Query param management for robust session persistence
+if 'user_role' not in st.session_state:
+    st.session_state.user_role = None
+
+if 'username' not in st.session_state:
+    st.session_state.username = None
+
+# Query param management
+# Do not restore/save the current page in the URL because it can force
+# Streamlit back to an old page after logout or navigation.
 params = st.query_params
-if 'page' in params and params['page']:
-    st.session_state.page = params['page']
 if 'subject' in params and params['subject']:
     st.session_state['student_subject'] = params['subject']
 if 'week' in params and params['week']:
@@ -261,7 +270,6 @@ if 'student_id' in params and params['student_id']:
 def set_query_params():
     st.query_params.clear()
     st.query_params.update({
-        'page': st.session_state.page,
         'subject': st.session_state.get('student_subject', ''),
         'week': st.session_state.get('student_week', ''),
         'student_id': st.session_state.get('student_id', '')
@@ -270,6 +278,16 @@ login_button = False
 username = ""
 password = ""
 role = "Student"
+
+def require_role(required_role):
+    if (
+        not st.session_state.get("authenticated", False)
+        or st.session_state.get("user_role") != required_role
+    ):
+        st.session_state.clear()
+        st.session_state.page = "main"
+        st.query_params.clear()
+        st.rerun()
 if st.session_state.page == 'main':
     st.sidebar.empty()
 
@@ -501,22 +519,82 @@ CyberNexa • Secure AI-Powered Education
 """,
                 unsafe_allow_html=True
             )
-    if login_button and (not username.strip() or not password.strip()):
-        st.error("Please enter your username and password.")
+    if login_button:
+        if not username.strip() or not password.strip():
+            st.error("Please enter your username and password.")
 
-    if login_button and username.strip() and password.strip() and role == "Student":
-        st.session_state.page = "student_login"
-        set_query_params()
-        st.rerun()
+        elif role == "Student":
+            user_doc = db.collection("users").document(username.strip()).get()
 
-    if login_button and username.strip() and password.strip() and role == "Teacher":
-        st.session_state.teacher_id = username.strip()
-        st.session_state.page = "teacher"
-        set_query_params()
-        st.rerun()
+            if not user_doc.exists:
+                st.error("User not found.")
+
+            else:
+                user_data = user_doc.to_dict() or {}
+
+                stored_hash = user_data.get("password_hash", "")
+                stored_role = user_data.get("role", "")
+
+                try:
+                    password_ok = bcrypt.checkpw(
+                        password.encode("utf-8"),
+                        stored_hash.encode("utf-8")
+                    )
+                except (ValueError, AttributeError):
+                    password_ok = False
+
+                if not password_ok:
+                    st.error("Incorrect password.")
+
+                elif stored_role.strip().lower() != "student":
+                    st.error("Wrong role.")
+
+                else:
+                    st.session_state.authenticated = True
+                    st.session_state.user_role = "Student"
+                    st.session_state.username = username.strip()
+                    st.session_state.page = "student_login"
+                    set_query_params()
+                    st.rerun()
+
+        elif role == "Teacher":
+            user_doc = db.collection("users").document(username.strip()).get()
+
+            if not user_doc.exists:
+                st.error("User not found.")
+
+            else:
+                user_data = user_doc.to_dict() or {}
+                stored_hash = user_data.get("password_hash", "")
+                stored_role = user_data.get("role", "")
+
+                try:
+                    password_ok = bcrypt.checkpw(
+                        password.encode("utf-8"),
+                        stored_hash.encode("utf-8")
+                    )
+                except (ValueError, AttributeError):
+                    password_ok = False
+
+                if not password_ok:
+                    st.error("Incorrect password.")
+
+                elif stored_role.strip().lower() != "teacher":
+                    st.error("Wrong role.")
+
+                else:
+                    st.session_state.authenticated = True
+                    st.session_state.user_role = "Teacher"
+                    st.session_state.username = username.strip()
+                    st.session_state.teacher_id = username.strip()
+                    st.session_state.page = "teacher"
+                    set_query_params()
+                    st.rerun()
 
     st.stop()
+
 if st.session_state.page == 'teacher':
+    require_role("Teacher")
     st.sidebar.header("Teacher Options")
 
     if st.button("⬅️ Back to Main Page"):
@@ -551,9 +629,9 @@ if st.session_state.page == 'teacher':
             key="teacher_logout",
             use_container_width=True
         ):
-            st.session_state.pop("teacher_id", None)
+            st.session_state.clear()
             st.session_state.page = "main"
-            set_query_params()
+            st.query_params.clear()
             st.rerun()
 
     # CyberNexa branding
@@ -980,6 +1058,7 @@ if st.session_state.page == 'teacher':
                     save_quiz_to_firestore(new_subject, new_week, edited_questions)
                     st.success(f"Quiz saved to Firestore for {new_subject} / {new_week}. It is now available to students.")
 elif st.session_state.page == 'teacher_analytics':
+    require_role("Teacher")
     st.sidebar.empty()
 
     # Teacher analytics navigation
@@ -1009,9 +1088,9 @@ elif st.session_state.page == 'teacher_analytics':
             key="analytics_logout",
             use_container_width=True
         ):
-            st.session_state.pop("teacher_id", None)
+            st.session_state.clear()
             st.session_state.page = "main"
-            set_query_params()
+            st.query_params.clear()
             st.rerun()
 
     # CyberNexa logo
@@ -1217,6 +1296,7 @@ elif st.session_state.page == 'teacher_analytics':
 
     st.stop()
 elif st.session_state.page == 'student_login':
+    require_role("Student")
     st.sidebar.empty()
 
     if st.button("⬅ Back to Home"):
@@ -1267,7 +1347,7 @@ elif st.session_state.page == 'student_login':
         if st.button("Continue", disabled=not valid):
             # Reset all user-specific session state on new login
             for key in list(st.session_state.keys()):
-                if key not in ["page"]:
+                if key not in ["page", "authenticated", "user_role", "username"]:
                     del st.session_state[key]
             st.session_state.student_id = new_id
             st.session_state.page = 'student_subject_select'
@@ -1277,7 +1357,7 @@ elif st.session_state.page == 'student_login':
         if st.button("Continue", disabled=(not selected or selected == "Add new student...")):
             # Reset all user-specific session state on new login
             for key in list(st.session_state.keys()):
-                if key not in ["page"]:
+                if key not in ["page", "authenticated", "user_role", "username"]:
                     del st.session_state[key]
             st.session_state.student_id = selected
             st.session_state.page = 'student_subject_select'
@@ -1286,6 +1366,7 @@ elif st.session_state.page == 'student_login':
     st.stop()
 
 elif st.session_state.page == 'student_subject_select':
+    require_role("Student")
     st.sidebar.empty()
 
     # Back button
@@ -1340,6 +1421,7 @@ elif st.session_state.page == 'student_subject_select':
     st.stop()
 
 elif st.session_state.page == 'student_pre_survey':
+    require_role("Student")
     st.sidebar.empty()
     st.title("Pre-Quiz Survey")
     st.markdown("Please complete the pre-quiz survey below before starting your quiz.")
@@ -1373,6 +1455,7 @@ elif st.session_state.page == 'student_pre_survey':
     st.stop()
 
 elif st.session_state.page == 'student_quiz':
+    require_role("Student")
     st.sidebar.empty()
 
     # Protect the Student Hub if no student is logged in
@@ -1410,21 +1493,9 @@ elif st.session_state.page == 'student_quiz':
             key="student_hub_logout",
             use_container_width=True
         ):
-            # Remove student-specific session information
-            student_keys = [
-                "student_id",
-                "student_subject",
-                "student_week",
-                "student_subject_select",
-                "last_displayed_index"
-            ]
-
-            for key in student_keys:
-                if key in st.session_state:
-                    del st.session_state[key]
-
-            st.session_state.page = 'main'
-            set_query_params()
+            st.session_state.clear()
+            st.session_state.page = "main"
+            st.query_params.clear()
             st.rerun()
 
     st.write("")
@@ -1988,6 +2059,7 @@ Type your answer below. The AI tutor will provide feedback and guide you to the 
 
     set_query_params() # Update query params after any changes
 elif st.session_state.page == 'student_progress':
+    require_role("Student")
     st.sidebar.empty()
 
     # Protect the page if no student is logged in
@@ -2020,11 +2092,9 @@ elif st.session_state.page == 'student_progress':
             "🚪 Log Out",
             use_container_width=True
         ):
-            st.session_state.pop("student_id", None)
-            st.session_state.pop("student_subject", None)
-            st.session_state.pop("student_week", None)
+            st.session_state.clear()
             st.session_state.page = "main"
-            set_query_params()
+            st.query_params.clear()
             st.rerun()
 
     # Page header
@@ -2331,6 +2401,7 @@ Review your completed quizzes, scores and recent activity.
                 )
     st.stop()
 elif st.session_state.page == 'student_post_survey':
+    require_role("Student")
     st.sidebar.empty()
     st.title("Post-Quiz Survey")
     st.success("Please complete the post-quiz survey below:")
