@@ -1,6 +1,7 @@
 # CyberNexa – Setup, Usage and Deployment Guide
 
-CyberNexa is a secure, AI-powered Intelligent Tutoring System (ITS) for cybersecurity education.  
+CyberNexa is a secure, AI-powered Intelligent Tutoring System (ITS) for cybersecurity education.
+
 The prototype uses Streamlit for the user interface, Firebase Firestore for persistent data, and configurable LLM providers including Groq, Ollama and OpenAI.
 
 ---
@@ -12,7 +13,7 @@ Recommended local environment:
 - Python 3.11 or 3.12
 - Git
 - Internet connection for cloud LLM providers
-- Docker Desktop for container / Blue-Green deployment
+- Docker Desktop for container and Blue-Green deployment
 - Ollama only when using a local LLM
 
 > Python 3.11 or 3.12 is recommended for the current dependency set.
@@ -26,7 +27,7 @@ git clone https://github.com/bush300/genai-its.git
 cd genai-its
 ```
 
-Make sure you are using the latest `main` branch:
+Make sure the latest `main` branch is being used:
 
 ```bash
 git switch main
@@ -55,10 +56,20 @@ source .venv/bin/activate
 
 ## 4. Install Dependencies
 
+Upgrade pip and install the project requirements:
+
 ```bash
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-Troubleshooting: If you encounter a version conflict or error while installing the requirements, manually install the Gemini SDK first by running python -m pip install google-genai
+```
+
+If a Gemini SDK dependency is missing, it can be installed separately with:
+
+```bash
+python -m pip install google-genai
+```
+
+If installation fails because of a temporary package-download or network error, retry the command after confirming internet access.
 
 ---
 
@@ -67,6 +78,18 @@ Troubleshooting: If you encounter a version conflict or error while installing t
 CyberNexa keeps private credentials outside the source code.
 
 Create a local `.env` file using `.env.example` as a guide.
+
+Example configuration:
+
+```env
+LLM_PROVIDER=groq
+GROQ_API_KEY=your_groq_key
+GOOGLE_API_KEY=your_gemini_key
+```
+
+The Google Gemini key is used by the security checking workflow.
+
+If OpenAI is selected as the provider, configure the required OpenAI API key according to `.env.example`.
 
 Also create:
 
@@ -80,7 +103,7 @@ using:
 .streamlit/secrets.example.toml
 ```
 
-as a guide.
+as a guide for Firebase and Streamlit secrets.
 
 Do **not** commit real API keys, Firebase credentials, `.env`, or `secrets.toml` to GitHub.
 
@@ -110,6 +133,8 @@ Run the official project test suite:
 python -m pytest tests -q
 ```
 
+The test suite covers application, security, provider, deployment and file-validation behaviour.
+
 ---
 
 ## 8. Run CyberNexa Locally
@@ -122,7 +147,7 @@ python -m streamlit run 1.1_interface/streamlit_app.py
 
 Streamlit will display the local application URL in the terminal.
 
-The application provides separate Student and Teacher portals.
+CyberNexa provides separate Student and Teacher portals.
 
 ---
 
@@ -154,13 +179,13 @@ Provider-specific model and governance configuration is maintained in:
 config/llm_config.yaml
 ```
 
-The provider can be changed without modifying the main application code.
+The provider can therefore be changed without modifying the main application code.
 
 ---
 
 ## 10. Local Ollama Setup
 
-Install Ollama separately, then download the local model:
+Install Ollama separately, then download the required local model:
 
 ```bash
 ollama pull llama3.2
@@ -172,7 +197,7 @@ Confirm that it is available:
 ollama list
 ```
 
-Then set:
+Then configure:
 
 ```env
 LLM_PROVIDER=ollama
@@ -196,31 +221,78 @@ CyberNexa includes Blue-Green deployment infrastructure using Docker Compose and
 - Health checks are used before switching traffic.
 - Traffic can be rolled back to Blue if Green fails.
 
+The Docker image also installs the Linux runtime libraries required by OpenCV and PDF-processing components.
+
+### Local Docker secrets configuration
+
+Private `.env` and Streamlit secret files are excluded from the Docker image and must not be committed.
+
+For local end-to-end Docker testing, create:
+
+```text
+deploy/compose.local.yml
+```
+
+with:
+
+```yaml
+services:
+  blue:
+    env_file:
+      - ../.env
+    environment:
+      LLM_PROVIDER: groq
+    volumes:
+      - ../.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
+
+  green:
+    env_file:
+      - ../.env
+    environment:
+      LLM_PROVIDER: groq
+    volumes:
+      - ../.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
+```
+
+This local file should remain untracked because it references private local configuration.
+
 ### Start the Blue and Green services
+
+For the standard deployment:
 
 ```bash
 docker compose -f deploy/compose.blue-green.yml up --build -d
 ```
 
+For local end-to-end testing with private configuration:
+
+```bash
+docker compose \
+  -f deploy/compose.blue-green.yml \
+  -f deploy/compose.local.yml \
+  up --build -d
+```
+
 ### Check service status
 
 ```bash
-docker compose -f deploy/compose.blue-green.yml ps
+docker compose \
+  -f deploy/compose.blue-green.yml \
+  -f deploy/compose.local.yml \
+  ps
 ```
 
-### View logs
+Both `blue` and `green` should report a healthy status.
 
-```bash
-docker compose -f deploy/compose.blue-green.yml logs --tail=100
+### Access the application
+
+Open:
+
+```text
+http://localhost:8080
 ```
 
-### Switch traffic to Green
-
-From Git Bash or another Bash-compatible shell:
-
-```bash
-bash deploy/switch-slot.sh green
-```
+Nginx proxies requests to the currently active deployment slot.
 
 ### Check the active deployment slot
 
@@ -228,7 +300,21 @@ bash deploy/switch-slot.sh green
 curl http://localhost:8080/deployment-slot
 ```
 
-Expected after switching:
+### Switch traffic to Green
+
+From Bash, Git Bash, macOS Terminal or another Bash-compatible shell:
+
+```bash
+bash deploy/switch-slot.sh green
+```
+
+Verify:
+
+```bash
+curl http://localhost:8080/deployment-slot
+```
+
+Expected:
 
 ```text
 green
@@ -240,7 +326,7 @@ green
 bash deploy/switch-slot.sh blue
 ```
 
-Check again:
+Verify:
 
 ```bash
 curl http://localhost:8080/deployment-slot
@@ -252,26 +338,55 @@ Expected:
 blue
 ```
 
+The HTTP response can also be checked with:
+
+```bash
+curl -I http://localhost:8080
+```
+
+The response should include:
+
+```text
+HTTP/1.1 200 OK
+X-Deployment-Slot: blue
+```
+
+or the currently active deployment slot.
+
+### View logs
+
+```bash
+docker compose \
+  -f deploy/compose.blue-green.yml \
+  -f deploy/compose.local.yml \
+  logs --tail=100
+```
+
 ### Stop the deployment
 
 ```bash
-docker compose -f deploy/compose.blue-green.yml down -v
+docker compose \
+  -f deploy/compose.blue-green.yml \
+  -f deploy/compose.local.yml \
+  down
 ```
 
 ---
 
 ## 12. CI/CD
 
-GitHub Actions is used to provide automated quality and deployment checks.
+GitHub Actions provides automated quality and deployment checks.
 
-The CI workflow includes:
+The CyberNexa CI workflow includes:
 
 - configuration validation
-- Python syntax / compilation checks
-- automated tests
-- checks to prevent private credential files from being tracked
+- Python syntax and compilation checks
+- automated pytest execution
+- automated coverage reporting
+- generation of a `coverage.xml` coverage artifact
+- checks preventing private credential files from being tracked
 
-The Blue-Green workflow validates:
+The Blue-Green Deployment Validation workflow checks:
 
 - container build
 - service startup
@@ -291,17 +406,34 @@ CyberNexa includes governance controls around LLM usage, including:
 - cost-budget controls
 - input sanitisation
 - output guardrails
-- audit logging integration
+- audit logging
+- file-upload validation
+- cloud egress masking
+
+Before requests are sent to supported cloud LLM providers, sensitive values such as email addresses and student identifiers can be masked to reduce unnecessary exposure of personal information.
 
 These controls help reduce misuse, unexpected API usage and exposure of restricted information.
 
 ---
 
-## 14. Known Limitation
+## 14. Verification Status and Known Limitations
 
-The Blue-Green deployment infrastructure has passed automated CI validation for build, health checks, traffic switching and rollback.
+The Blue-Green deployment infrastructure has passed automated GitHub Actions validation for container build, service health, routing, traffic switching and rollback.
 
-Manual end-to-end Docker verification using the complete live Firebase configuration, private secrets and full Student / Teacher workflows is still being finalised. Do not commit local credential files when performing this test.
+Manual end-to-end Docker testing has also verified the Student workflow through Nginx, including:
+
+- application startup through `localhost:8080`
+- Student portal access
+- quiz loading
+- Gemini-based security checking
+- Groq-generated quiz feedback
+- Blue-to-Green traffic switching
+- Green-to-Blue rollback
+- continued application operation after rollback
+
+A local clean Docker rebuild previously encountered a temporary external Python package-download/build dependency error while installing the requirements. The failure occurred before the OpenCV runtime-library layer. The corresponding Dockerfile change has subsequently passed the repository's automated Blue-Green validation workflow.
+
+Full end-to-end verification of every Teacher workflow and every external provider configuration is outside the scope of this installation check.
 
 ---
 
@@ -314,7 +446,7 @@ python 1.5_security/config_validator.py
 # Run tests
 python -m pytest tests -q
 
-# Start application
+# Start application locally
 python -m streamlit run 1.1_interface/streamlit_app.py
 
 # Test selected LLM provider
@@ -323,9 +455,24 @@ python 1.3_models/quick_test.py
 # Check local Ollama models
 ollama list
 
-# Start Blue-Green deployment
-docker compose -f deploy/compose.blue-green.yml up --build -d
+# Start local Blue-Green deployment
+docker compose \
+  -f deploy/compose.blue-green.yml \
+  -f deploy/compose.local.yml \
+  up --build -d
 
 # Check deployment containers
-docker compose -f deploy/compose.blue-green.yml ps
+docker compose \
+  -f deploy/compose.blue-green.yml \
+  -f deploy/compose.local.yml \
+  ps
+
+# Check active slot
+curl http://localhost:8080/deployment-slot
+
+# Switch to Green
+bash deploy/switch-slot.sh green
+
+# Roll back to Blue
+bash deploy/switch-slot.sh blue
 ```
