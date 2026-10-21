@@ -8,21 +8,14 @@ Covers:
 """
 
 import io
-import sys
 from pathlib import Path
 
 import pytest
 from PIL import Image
 
+import file_validator
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SECURITY_DIR = PROJECT_ROOT / "1.5_security"
-
-if str(SECURITY_DIR) not in sys.path:
-    sys.path.insert(0, str(SECURITY_DIR))
-
-
-import file_validator  # noqa: E402
 
 from file_validator import FileValidationError, validate_upload  # noqa: E402
 
@@ -147,13 +140,6 @@ def test_supported_extensions_cover_every_kind():
 @pytest.fixture
 def quiz_extractor(monkeypatch):
     """Import quiz_extractor with the security gate replaced by a recorder."""
-
-    for folder in ("1.3_models", "1.4_agent2_quiz"):
-        path = str(PROJECT_ROOT / folder)
-        if path not in sys.path:
-            sys.path.insert(0, path)
-    if str(PROJECT_ROOT) not in sys.path:
-        sys.path.insert(0, str(PROJECT_ROOT))
 
     import quiz_extractor as module
 

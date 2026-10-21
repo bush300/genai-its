@@ -109,6 +109,34 @@ Do **not** commit real API keys, Firebase credentials, `.env`, or `secrets.toml`
 
 ---
 
+## 5a. Create User Accounts
+
+Students and Teachers log in with a username/password stored in the Firestore
+`users` collection. There is no self-service sign-up; accounts are created
+with:
+
+```bash
+python 1.5_security/create_account.py --username alice --role Student
+python 1.5_security/create_account.py --username bob --role Teacher
+```
+
+You will be prompted for a password (hidden input, entered twice to confirm).
+The script hashes it with bcrypt and writes `users/{username}` with
+`password_hash` and `role`. It needs the same Firebase Admin credentials as
+the main app, e.g.:
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS=path/to/service-account.json
+```
+
+Pass `--overwrite` to replace an existing account (e.g. to reset a password).
+
+A student's account `username` is also their student ID: it is bound to the
+login automatically and cannot be changed by the student, so one student
+cannot view or edit another student's quiz progress.
+
+---
+
 ## 6. Validate Configuration
 
 Before starting the application, run:
@@ -206,7 +234,7 @@ LLM_PROVIDER=ollama
 A provider smoke test can be run with:
 
 ```bash
-python 1.3_models/quick_test.py
+python quick_test.py
 ```
 
 ---
@@ -401,11 +429,36 @@ The Blue-Green Deployment Validation workflow checks:
 
 CyberNexa includes governance controls around LLM usage, including:
 
-- request-rate limiting
-- daily request limits
-- cost-budget controls
-- input sanitisation
-- output guardrails
+- request-rate limiting and daily request/cost budgets, tracked **per student**
+  (each student's session is passed as a `caller_id`, so one student making
+  heavy use of the tutor cannot exhaust another student's quota)
+- input sanitisation: a navigation whitelist, a static keyword/regex filter,
+  and a secondary Gemini LLM gate, in that order (see `1.5_security/README.md`
+  and `1.5_security/input_sanitizer.py`). Oversized input is capped before it
+  reaches the gate. The secondary gate **fails closed**: if every candidate
+  Gemini model is unreachable, the input is treated as unsafe rather than let
+  through.
+- output guardrails, running after every tutor reply:
+  - a canary-token check that detects the tutor leaking its own system
+    instructions, logged to the audit log as `output_guardrail_trigger`
+  - a rubric/answer-leak check (detecting the tutor's reply closely copying
+    the stored marking rubric/answer) is planned but not yet implemented -
+    `1.5_security/output_guardrail.py` is a placeholder pending that work
+- a blocked-input banner that tells the student their input was blocked
+  without repeating the detailed reason (the detail stays in the audit log,
+  so a rejected prompt can't be used to learn how to refine the next attempt)
+- an instructor release gate: a newly uploaded quiz is saved as a draft and
+  is not shown to students until a teacher clicks **Approve** in the Teacher
+  Hub; quizzes saved before this gate existed (with no `status` field) are
+  still treated as published
+- RBAC checks (`require_role`) on every Teacher/Student page, including the
+  Security Events audit page
+- the content-safety gate (`quiz_extractor._check_content_safe`) runs on
+  every knowledge-base upload, PDF or plain text, before it's saved to
+  Firestore
+- `firestore.rules` denies all direct client access - every read/write goes
+  through the Streamlit backend over the Firebase Admin SDK, never a
+  browser/client SDK; see `docs/data_flow.md` for where data actually goes
 - audit logging
 - file-upload validation
 - cloud egress masking
@@ -450,7 +503,7 @@ python -m pytest tests -q
 python -m streamlit run 1.1_interface/streamlit_app.py
 
 # Test selected LLM provider
-python 1.3_models/quick_test.py
+python quick_test.py
 
 # Check local Ollama models
 ollama list

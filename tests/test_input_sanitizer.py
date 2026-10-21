@@ -6,23 +6,18 @@ Covers three layers of `check_secondary_gate`:
   3. Secondary LLM gate    - advanced/ambiguous inputs are routed to the LLM,
                              whose verdict is mocked so tests stay offline
                              and deterministic.
+Plus fail-closed behaviour (Group 4) and the input length cap (Group 5).
 """
 
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-import middleware.input_sanitizer as input_sanitizer_module  # noqa: E402
-from middleware.input_sanitizer import InputSanitizer  # noqa: E402
+import input_sanitizer as input_sanitizer_module
+from input_sanitizer import InputSanitizer, cap_input_length, MAX_INPUT_CHARS
 
 
 @pytest.fixture
@@ -125,3 +120,44 @@ def test_secondary_llm_gate_advanced_injections(
 
     assert is_safe is llm_says_safe
     assert returned_reason == reason
+
+
+# ---------------------------------------------------------------------------
+# Group 4: Fail-closed behaviour - if every candidate model errors out, the
+# gate must still deny the request rather than let it through unchecked.
+# ---------------------------------------------------------------------------
+
+
+def test_gate_fails_closed_when_all_models_raise(
+    sanitizer: InputSanitizer,
+) -> None:
+    sanitizer.client.models.generate_content.side_effect = RuntimeError("model unavailable")
+
+    is_safe, reason = sanitizer.check_secondary_gate("What is a buffer overflow?")
+
+    assert is_safe is False
+    assert "unavailable" in reason.lower()
+    assert sanitizer.client.models.generate_content.call_count == len(
+        sanitizer.candidate_models
+    )
+
+
+# ---------------------------------------------------------------------------
+# Group 5: Input length cap applied before the gate is ever called.
+# ---------------------------------------------------------------------------
+
+
+def test_cap_input_length_leaves_short_input_untouched() -> None:
+    prompt = "This is a normal-length answer."
+    capped, was_truncated = cap_input_length(prompt)
+
+    assert capped == prompt
+    assert was_truncated is False
+
+
+def test_cap_input_length_truncates_oversized_input() -> None:
+    prompt = "a" * (MAX_INPUT_CHARS + 500)
+    capped, was_truncated = cap_input_length(prompt)
+
+    assert len(capped) == MAX_INPUT_CHARS
+    assert was_truncated is True

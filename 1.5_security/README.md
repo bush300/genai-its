@@ -192,6 +192,80 @@ Run the project tests with:
 
 At the time of integration, all 35 tests passed.
 
+## Later security/governance additions
+
+The following were added alongside the audit logger described above, as part
+of closing out the project's security coverage:
+
+- **Per-student rate/budget limits.** `QuizAgent` now passes the student's ID
+  through to `get_llm(..., caller_id=student_id)` (see `1.4_agent2_quiz/quiz_agent.py`),
+  so each student has an independent request-window, daily-request and
+  daily-cost counter in `rate_limiter.UsageGovernor`. Previously every student
+  shared one `"global"` bucket, so one student's usage could block everyone
+  else from using the tutor for the rest of the day.
+- **Rate-limit/budget errors shown as friendly messages.** `RateLimitExceeded`
+  and `DailyBudgetExceeded` (both raised from `rate_limiter.py`) are now caught
+  around the call to `agent.handle_input(...)` in `streamlit_app.py` and shown
+  with `st.warning(...)` instead of surfacing a raw traceback.
+- **Canary hits are now audit-logged.** Detecting `CANARY_TOKEN` in a tutor
+  reply writes an `output_guardrail_trigger` event (severity `CRITICAL`)
+  before the student is shown the exfiltration-detected message. Previously
+  this was only shown in the UI and never recorded.
+- **Output guardrail (rubric/answer-leak detection) - pending.**
+  `1.5_security/output_guardrail.py` exists as a placeholder; the comparison
+  logic (tutor reply vs. stored rubric/answer, replace a close copy with a
+  safe message, log `output_guardrail_trigger`) is Anthony's to land there so
+  we don't build it twice. `streamlit_app.py` already captures the current
+  question before calling the tutor model, ready for this to be wired in.
+- **Input length cap.** `input_sanitizer.cap_input_length()` caps
+  a student answer to `MAX_INPUT_CHARS` (4000) before it reaches the secondary
+  gate, bounding gate cost/latency and blunting "bury the instruction in a
+  wall of text" injection attempts.
+- **Blocked-input banner is now generic.** The red banner shown when input is
+  blocked no longer echoes the gate's detailed `reason` to the student; the
+  detail is still written to the audit log (`input_sanitisation_flag` event).
+- **RBAC gap fixed.** The Security Events page (`teacher_security`) was
+  missing its `require_role("Teacher")` check and was reachable by any
+  authenticated session; it now requires the Teacher role like every other
+  teacher-only page.
+- **Student ID bound to login.** `st.session_state.student_id` is now set
+  directly from the authenticated username at login. The old `?student_id=`
+  query-param override and the student-ID dropdown are removed, since both
+  let one student view or act as another student by editing the URL or
+  picking a different ID.
+- **Account creation script.** `1.5_security/create_account.py` hashes a
+  password with bcrypt and writes `users/{username}` with `password_hash` and
+  `role`, so accounts are created through one consistent path instead of
+  manual Firestore edits. See `README_CyberNexa.md` section "Create User
+  Accounts".
+- **Instructor release gate.** `1.2_back_end/quiz_publication.py` adds
+  `is_quiz_published()` / `resolve_save_status()`. A newly uploaded quiz is
+  saved with `status: "draft"`; a teacher approves it from the Teacher Hub,
+  which sets `status: "published"`; the student-facing subject/week lists
+  only include published quizzes (a missing `status` field is treated as
+  published, so quizzes created before this gate existed keep working).
+- **Text knowledge-base uploads now go through the content-safety gate too.**
+  The PDF upload path already called `quiz_extractor._check_content_safe`
+  before saving KB content to Firestore; the `.txt` path didn't, so a plain
+  text file with injected instructions could skip the gate entirely and sit
+  in Firestore feeding every future quiz evaluation for that subject/week.
+  Both paths now call the same check.
+- **`firestore.rules`** (repo root) denies all direct client reads/writes.
+  Everything in this app goes through the Streamlit backend over the
+  Firebase Admin SDK, which bypasses these rules anyway - this is a backstop
+  in case a client key ever ends up somewhere it shouldn't.
+- **`docs/data_flow.md`** - a short diagram of what data goes where, and
+  what's masked before it reaches a cloud LLM provider.
+- **DP4 red-team tests** (`tests/test_dp4_redteam.py`) cover the three
+  scenarios from the DP4 spec: student identifiers getting masked before
+  reaching a cloud provider, a KB upload carrying injected content, and
+  direct (non-Admin-SDK) Firestore access being denied by the rules file.
+
+Tests for all of the above live in `tests/test_canary.py`,
+`tests/test_input_sanitizer.py` (fail-closed gate, length cap),
+`tests/test_quiz_publication.py`, `tests/test_create_account.py` and
+`tests/test_dp4_redteam.py`.
+
 ### RT-06 Rate-Limit Abuse Test
 
 The RT-06 demonstration sends repeated requests through the real rate limiter, confirms that the excessive request is blocked, creates a genuine `rate_limit_hit` event and verifies the event in the Firestore `audit_logs_test` collection.

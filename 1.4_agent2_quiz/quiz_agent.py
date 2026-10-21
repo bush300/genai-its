@@ -3,7 +3,7 @@ import json
 import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, firestore
-from middleware.input_sanitizer import CANARY_TOKEN
+from input_sanitizer import CANARY_TOKEN
 
 # Initialize Firebase only once
 if not firebase_admin._apps:
@@ -11,12 +11,12 @@ if not firebase_admin._apps:
     firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-def get_groq_llm(model_name=None, temperature=None):
+def get_groq_llm(model_name=None, temperature=None, caller_id="global"):
     # Loads model and temperature from .env, with agent-specific overrides
     from llm_provider import get_llm
     model = model_name or os.getenv("QUIZ_AGENT_MODEL", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"))
     temp = float(temperature if temperature is not None else os.getenv("QUIZ_AGENT_TEMPERATURE", os.getenv("GROQ_TEMPERATURE", "0.0")))
-    return get_llm(model_name=model, temperature=temp)
+    return get_llm(model_name=model, temperature=temp, caller_id=caller_id)
 
 class QuizAgent:
     def __init__(self, quiz_data, subject, week, student_id, profile):
@@ -30,7 +30,8 @@ class QuizAgent:
         self.current_q = self.performance.get("current_q", 0)
         self.started = self.performance.get("started", False)
         self.instructions_given = self.performance.get("instructions_given", False)
-        self.llm = get_groq_llm()
+        # Per-student caller_id so rate/budget limits don't pool all students together.
+        self.llm = get_groq_llm(caller_id=self.student_id)
 
     def load_performance(self):
         doc_ref = db.document(self.firestore_doc)
@@ -207,7 +208,7 @@ class QuizAgent:
             "- Do not mention scores, rubrics, or evaluation steps in your feedback.\n"
             "At the end, in a new line, write: SCORE: 1.0 if the answer is correct or mostly correct, or SCORE: 0.0 if not. If the input is a question or exploration, write SCORE: X (where X is the last valid score for this question, or 0.0 if not available).\n"
         )
-        eval_llm = get_groq_llm()
+        eval_llm = get_groq_llm(caller_id=self.student_id)
         response = eval_llm.invoke([{"role": "system", "content": prompt}]).content.strip()
         lines = response.splitlines()
         score = 0.0

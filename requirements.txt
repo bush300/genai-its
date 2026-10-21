@@ -24,6 +24,7 @@ unstructured_pytesseract
 PyDrive2
 google-cloud-firestore
 firebase-admin
+bcrypt
 # Add any other dependencies below as needed
 langchain-ollama
 langchain-openai

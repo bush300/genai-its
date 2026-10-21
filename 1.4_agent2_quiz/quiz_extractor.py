@@ -24,7 +24,7 @@ from file_validator import SUPPORTED_EXTENSIONS, validate_upload   # same (1.5_s
 
 from unstructured.partition.pdf import partition_pdf          # single import
 
-from middleware.input_sanitizer import InputSanitizer
+from input_sanitizer import InputSanitizer
 
 # ── Rate-limit handling ─────────────────────────────────────────────────
 # Extracting N questions makes 1 + 2N LLM calls, which easily exceeds the
@@ -522,12 +522,14 @@ def enrich_question_context(llm, question: str, context: str, source_text: str) 
         question=question,
         context=context,
     )
+    # temperature is set on the LLM itself (get_llm/get_groq_llm), not per-call -
+    # passing it here breaks on Ollama's client ("unexpected keyword argument
+    # 'temperature'"), so every Pass-2 call errored out under the default provider.
     enriched_context = llm.invoke(
         [
             {"role": "system", "content": "Return ONLY the enriched context as plain text. Do not add any preamble, conclusion, or any answer. Do NOT include any answer, solution, or worked example—just the context needed to answer the question. If the PDF contains an answer or solution, OMIT it from the context."},
             {"role": "user", "content": enrich_prompt},
-        ],
-        temperature=0.2  # Slightly higher for more helpful completions
+        ]
     ).content
     cleaned_context = clean_enriched_context(enriched_context)
     # Remove any lines that look like an answer (e.g., start with 'Answer:', 'Solution:', 'Worked Example:', or are long and not code)
@@ -593,7 +595,6 @@ def _extract_questions_from_text(source_text: str) -> list[dict]:
     llm = get_llm()
 
     pdf_text = source_text
-    st.write(f"✂️ Characters sent to LLM (per call): {len(pdf_text):,}")
 
     # Pass-1: Extract questions
     try:

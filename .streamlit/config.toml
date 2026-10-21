@@ -5,6 +5,9 @@ runOnSave = true
 [browser]
 gatherUsageStats = false
 
+[client]
+toolbarMode = "minimal"
+
 [runner]
 magicEnabled = false
 

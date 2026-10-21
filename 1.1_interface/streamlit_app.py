@@ -9,12 +9,9 @@ from progress_service import get_quizzes_completed, get_average_score, get_impro
 # Import the formatting utility for quiz context
 import sys
 
-#input sanitisation
 BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if BASE not in sys.path:
     sys.path.append(BASE)
-
-from middleware.input_sanitizer import InputSanitizer
 
 sys.path.append(os.path.join(os.path.dirname(__file__), 'utils'))
 from utils.format_quiz_context import format_quiz_context
@@ -121,6 +118,9 @@ from file_validator import validate_upload
 from quiz_extractor import extract_questions_from_pdf
 from quiz_agent import QuizAgent
 from audit_logger import AuditLogger
+from rate_limiter import RateLimitExceeded, DailyBudgetExceeded
+from quiz_publication import is_quiz_published, resolve_save_status
+from input_sanitizer import InputSanitizer, cap_input_length
 
 # Compatibility helper: some Streamlit versions expose experimental_rerun, others only have rerun
 def safe_rerun():
@@ -211,12 +211,19 @@ def load_security_events():
     return events
 
 
-def save_quiz_to_firestore(subject, week, questions):
+def save_quiz_to_firestore(subject, week, questions, status=None):
+    """Save a quiz. New quizzes default to draft; edits keep their existing
+    status unless `status` is given explicitly (e.g. the Approve action)."""
     doc_id = f"{subject}_{week}"
-    db.collection("finalised_quizzes").document(doc_id).set({
+    doc_ref = db.collection("finalised_quizzes").document(doc_id)
+    existing_doc = doc_ref.get()
+    existing_data = existing_doc.to_dict() if existing_doc.exists else None
+    resolved_status = resolve_save_status(existing_data, status)
+    doc_ref.set({
         "subject": subject,
         "week": week,
-        "questions": questions
+        "questions": questions,
+        "status": resolved_status
     })
 
 def load_quiz_from_firestore(subject, week):
@@ -303,15 +310,15 @@ if 'subject' in params and params['subject']:
     st.session_state['student_subject'] = params['subject']
 if 'week' in params and params['week']:
     st.session_state['student_week'] = params['week']
-if 'student_id' in params and params['student_id']:
-    st.session_state['student_id'] = params['student_id']
+# student_id no longer comes from the URL - it's set from the logged-in
+# username instead, otherwise a student could just edit the query string
+# and see someone else's data.
 
 def set_query_params():
     st.query_params.clear()
     st.query_params.update({
         'subject': st.session_state.get('student_subject', ''),
-        'week': st.session_state.get('student_week', ''),
-        'student_id': st.session_state.get('student_id', '')
+        'week': st.session_state.get('student_week', '')
     })
 login_button = False
 username = ""
@@ -777,7 +784,13 @@ if st.session_state.page == 'teacher':
                     # If text file, read content
                     if kind == "text":
                         progress.text("Parsing text file...")
-                        content_text = file_bytes.decode('utf-8', errors='ignore')
+                        decoded_text = file_bytes.decode('utf-8', errors='ignore')
+                        try:
+                            import quiz_extractor
+                            quiz_extractor._check_content_safe(decoded_text)
+                            content_text = decoded_text
+                        except Exception as e:
+                            progress.text(f"Security check failed for uploaded content: {e}")
 
                     # If PDF, save temporarily and extract text
                     elif kind == "pdf":
@@ -861,6 +874,22 @@ if st.session_state.page == 'teacher':
 
         if subject and week and quiz_data:
             st.success(f"Selected quiz: {subject} / {week}")
+
+            # Instructor release gate: a quiz stays hidden from students until
+            # a teacher approves it.
+            quiz_doc_ref = db.collection("finalised_quizzes").document(f"{subject}_{week}")
+            quiz_doc_data = quiz_doc_ref.get().to_dict() or {}
+            if is_quiz_published(quiz_doc_data):
+                st.caption("✅ Status: Published (visible to students)")
+            else:
+                status_col1, status_col2 = st.columns([3, 1])
+                with status_col1:
+                    st.warning("📝 Status: Draft (not visible to students yet)")
+                with status_col2:
+                    if st.button("Approve", key=f"approve_{subject}_{week}"):
+                        quiz_doc_ref.update({"status": "published"})
+                        st.success("Quiz approved and published to students.")
+                        safe_rerun()
 
             # Build a KB text blob from saved knowledgebase entries for enrichment (safe, minimal change)
             kb_entries = load_knowledgebase_from_firestore(subject, week) or []
@@ -1059,7 +1088,10 @@ if st.session_state.page == 'teacher':
                     edited_questions = st.session_state.uploaded_questions
                 if st.button("Save Quiz"):
                     save_quiz_to_firestore(new_subject, new_week, edited_questions)
-                    st.success(f"Quiz saved to Firestore for {new_subject} / {new_week}. It is now available to students.")
+                    st.success(
+                        f"Quiz saved to Firestore for {new_subject} / {new_week} as a draft. "
+                        "Go to 'Select Existing Quiz' and click Approve to publish it to students."
+                    )
 elif st.session_state.page == 'teacher_analytics':
     require_role("Teacher")
     st.sidebar.empty()
@@ -1311,6 +1343,7 @@ elif st.session_state.page == 'teacher_analytics':
 
     st.stop()
 elif st.session_state.page == 'teacher_security':
+    require_role("Teacher")
     st.sidebar.empty()
 
     # Teacher security navigation
@@ -1517,73 +1550,14 @@ elif st.session_state.page == 'teacher_security':
 
 elif st.session_state.page == 'student_login':
     require_role("Student")
-    st.sidebar.empty()
-
-    if st.button("⬅ Back to Home"):
-        st.session_state.page = 'main'
-        set_query_params()
-        st.rerun()
-
-    logo_path = os.path.join(
-        os.path.dirname(__file__),
-        "assets",
-        "cybernexa_logo.png"
-    )
-
-    st.image(logo_path, width=180)
-
-    st.title("🧑‍🎓 Student Portal")
-    st.caption("Welcome back! Select your Student ID to continue.")
-
-    # --- Student ID selection/registration ---
-    firestore_ids = set()
-    for doc in db.collection("student_surveys").stream():
-        data = doc.to_dict()
-        if data and "student_id" in data:
-            firestore_ids.add(data["student_id"])
-    for doc in db.collection("student_performance").stream():
-        doc_id = doc.id
-        if doc_id:
-            sid = doc_id.split("_")[0]
-            firestore_ids.add(sid)
-    local_profiles_dir = os.path.join("data", "student_profiles")
-    local_ids = set()
-    if os.path.exists(local_profiles_dir):
-        for entry in os.listdir(local_profiles_dir):
-            if os.path.isdir(os.path.join(local_profiles_dir, entry)) or entry.endswith(".json"):
-                local_ids.add(entry.replace(".json", ""))
-    all_ids = sorted(firestore_ids.union(local_ids))
-    # 2. Dropdown + Add new option
-    options = all_ids + ["Add new student..."] if all_ids else ["Add new student..."]
-    selected = st.selectbox("Select your student ID", options, key="student_id_select")
-    new_id = None
-    if selected == "Add new student...":
-        new_id = st.text_input("Enter new student ID (letters, numbers, underscores only)", key="new_student_id")
-        valid = bool(new_id) and new_id.isidentifier() and new_id not in all_ids
-        if new_id and not new_id.isidentifier():
-            st.warning("Student ID must contain only letters, numbers, or underscores and not start with a number.")
-        elif new_id and new_id in all_ids:
-            st.warning("This student ID already exists. Please choose another.")
-        if st.button("Continue", disabled=not valid):
-            # Reset all user-specific session state on new login
-            for key in list(st.session_state.keys()):
-                if key not in ["page", "authenticated", "user_role", "username"]:
-                    del st.session_state[key]
-            st.session_state.student_id = new_id
-            st.session_state.page = 'student_subject_select'
-            set_query_params()
-            st.rerun()
-    else:
-        if st.button("Continue", disabled=(not selected or selected == "Add new student...")):
-            # Reset all user-specific session state on new login
-            for key in list(st.session_state.keys()):
-                if key not in ["page", "authenticated", "user_role", "username"]:
-                    del st.session_state[key]
-            st.session_state.student_id = selected
-            st.session_state.page = 'student_subject_select'
-            set_query_params()
-            st.rerun()
-    st.stop()
+    # student ID = username, no dropdown to pick someone else's.
+    for key in list(st.session_state.keys()):
+        if key not in ["page", "authenticated", "user_role", "username"]:
+            del st.session_state[key]
+    st.session_state.student_id = st.session_state.username
+    st.session_state.page = 'student_subject_select'
+    set_query_params()
+    st.rerun()
 
 elif st.session_state.page == 'student_subject_select':
     require_role("Student")
@@ -1607,11 +1581,11 @@ elif st.session_state.page == 'student_subject_select':
     st.title("📚 Choose Your Subject")
     st.caption("Select the subject you would like to study today.")
 
-    # Get all subjects from Firestore
+    # Get all subjects from Firestore (published quizzes only)
     subjects = []
     for doc in db.collection("finalised_quizzes").stream():
         data = doc.to_dict()
-        if data and "subject" in data:
+        if data and "subject" in data and is_quiz_published(data):
             subjects.append(data["subject"])
 
     subjects = sorted(set(subjects))
@@ -1785,7 +1759,7 @@ Select a subject and week to begin or continue your quiz.
     for doc in db.collection("finalised_quizzes").stream():
         data = doc.to_dict()
 
-        if data and "subject" in data:
+        if data and "subject" in data and is_quiz_published(data):
             subjects.append(data["subject"])
 
     subjects = sorted(set(subjects))
@@ -1824,7 +1798,7 @@ Select a subject and week to begin or continue your quiz.
         for doc in db.collection("finalised_quizzes").stream():
             data = doc.to_dict()
 
-            if data and data.get("subject") == subject:
+            if data and data.get("subject") == subject and is_quiz_published(data):
                 selected_week = data.get("week")
 
                 if selected_week:
@@ -2122,6 +2096,11 @@ Type your answer below. The AI tutor will provide feedback and guide you to the 
         raw_user_input = st.chat_input("Type your answer and press Enter...")
 
         if raw_user_input:
+            # cap length before it hits the gate
+            raw_user_input, was_truncated = cap_input_length(raw_user_input)
+            if was_truncated:
+                st.info("Your answer was shortened before review because it was very long.")
+
             # 1. RUN SECURITY GATE FIRST
             is_safe, reason = sanitizer.check_secondary_gate(raw_user_input)
 
@@ -2152,10 +2131,11 @@ Type your answer below. The AI tutor will provide feedback and guide you to the 
                 )
 
                 # 2. TRIGGER RED BANNER GOVERNANCE
+                # don't show the actual reason - that's in the audit log above,
+                # no point telling the student exactly what tripped the filter
                 st.error(
-                    f"🚨 **Security Policy Violation**\n\n"
-                    f"Your input was intercepted and blocked.\n\n"
-                    f"**Reason:** {reason}"
+                    "🚨 **Security Policy Violation**\n\n"
+                    "Your input was blocked."
                 )
                 st.stop()  # Prevents execution from reaching line 1918 where 'response' is referenced
             else:
@@ -2201,22 +2181,50 @@ Type your answer below. The AI tutor will provide feedback and guide you to the 
                     {}
                 )
 
-                with st.spinner("CyberNexa is reviewing your answer..."):
-                    # Pass the BOUNDED input securely to the main AI model
-                    response, end_quiz = agent.handle_input(
-                        bounded_input,
-                        chat_history
-                    )
+                # grabbing this now so the rubric-leak check further down
+                # has the question to compare against once it's wired up
+                current_question = (
+                    agent.quiz_data[agent.current_q]
+                    if agent.current_q < len(agent.quiz_data)
+                    else None
+                )
+
+                try:
+                    with st.spinner("CyberNexa is reviewing your answer..."):
+                        # Pass the BOUNDED input securely to the main AI model
+                        response, end_quiz = agent.handle_input(
+                            bounded_input,
+                            chat_history
+                        )
+                except (RateLimitExceeded, DailyBudgetExceeded) as exc:
+                    st.warning(f"⏳ {exc}")
+                    st.stop()
 
                 # 4. POST-INFERENCE DETECTIVE CONTROL (Canary Token check)
-                from middleware.input_sanitizer import contains_canary_leak
+                from input_sanitizer import contains_canary_leak
                 if contains_canary_leak(response):
+                    security_audit_logger.log_event(
+                        event_type="output_guardrail_trigger",
+                        message="AI response contained the confidential canary marker.",
+                        severity="CRITICAL",
+                        user_id=st.session_state.get("student_id"),
+                        source_module="streamlit_app",
+                        metadata={
+                            "subject": subject,
+                            "week": week,
+                            "guardrail": "canary_token",
+                        },
+                    )
                     st.error(
                         "🚨 **Data Exfiltration Detected**\n\n"
                         "The AI response contained a confidential internal marker. "
                         "This session has been halted for review."
                     )
                     st.stop()
+
+                # 5. rubric/answer leak check goes here once Anthony's
+                # output_guardrail.py is done - current_question above is
+                # ready for it
 
             # Move to post-quiz survey when the quiz finishes
             if end_quiz == "qualtrics2":
