@@ -29,6 +29,13 @@ def create_account(username: str, password: str, role: str, overwrite: bool = Fa
         raise ValueError(f"role must be one of {sorted(VALID_ROLES)}, got {role!r}")
     if not username.strip():
         raise ValueError("username must not be empty")
+    if not username.isalnum():
+        # student_performance doc IDs are f"{student_id}_{subject}_{week}", and a
+        # couple of pages find a student's own records by prefix-matching that ID.
+        # An underscore (or any separator) in the username lets one username be a
+        # prefix of another's doc ID, e.g. "alice" would match "alice_smith"'s
+        # records too. Letters/digits only closes that off.
+        raise ValueError("username must contain only letters and digits (no underscores, spaces, etc.)")
     if len(password) < 8:
         raise ValueError("password must be at least 8 characters")
 

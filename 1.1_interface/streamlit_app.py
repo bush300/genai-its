@@ -113,13 +113,12 @@ sys.path.extend(
     ]
 )
 
-from document_loader import load_and_embed_pdf
 from file_validator import validate_upload
-from quiz_extractor import extract_questions_from_pdf
 from quiz_agent import QuizAgent
 from audit_logger import AuditLogger
 from rate_limiter import RateLimitExceeded, DailyBudgetExceeded
 from quiz_publication import is_quiz_published, resolve_save_status
+from student_records import belongs_to_student
 from input_sanitizer import InputSanitizer, cap_input_length
 
 # Compatibility helper: some Streamlit versions expose experimental_rerun, others only have rerun
@@ -2400,12 +2399,10 @@ Track your quiz performance, learning activity and improvement over time.
         "student_performance"
     ).stream():
 
-        if not performance_doc.id.startswith(
-            f"{student_id}_"
-        ):
-            continue
-
         performance_data = performance_doc.to_dict() or {}
+
+        if not belongs_to_student(performance_doc.id, performance_data, student_id):
+            continue
 
         score = performance_data.get("last_score", 0)
 

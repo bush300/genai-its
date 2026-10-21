@@ -1,5 +1,4 @@
 import os
-import json
 import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -43,10 +42,16 @@ class QuizAgent:
                 "answers": {},  # {q_id: [{"attempt": n, "answer": str, "feedback": str, "score": float}]}
                 "current_q": 0,
                 "started": False,
-                "instructions_given": False
+                "instructions_given": False,
+                "student_id": self.student_id,
             }
 
     def save_performance(self):
+        # Store student_id on the record itself rather than relying on parsing
+        # it back out of the document ID - that parsing (see
+        # load_student_performance in streamlit_app.py) splits on "_", which
+        # breaks for any student_id that itself contains an underscore.
+        self.performance["student_id"] = self.student_id
         db.document(self.firestore_doc).set(self.performance)
 
     def get_instructions(self):
@@ -287,20 +292,6 @@ class QuizAgent:
             self.performance["last_score"] = score
             self.performance["last_qid"] = str(self.current_q + 1)
             self.save_performance()
-            # Ensure score is float for comparison
-            try:
-                score_float = float(score)
-            except Exception:
-                score_float = 0.0
-            # Only auto-advance if score is 1.0 and feedback explicitly confirms correctness
-            feedback_lower = feedback.lower()
-            is_clearly_correct = (
-                score_float == 1.0 and (
-                    "correct:" in feedback_lower or 
-                    "great job!" in feedback_lower or 
-                    "your answer is correct because" in feedback_lower
-                ) and "incorrect:" not in feedback_lower
-            )
             # Ensure question is passed correctly
             q = self.quiz_data[self.current_q]  # Fetch the current question
             rubric = q.get("answer", "")  # Ensure rubric is fetched from the question
@@ -310,7 +301,6 @@ class QuizAgent:
             correctness_percentage = (satisfied_criteria / total_criteria) * 100 if total_criteria > 0 else 0
 
             # Only auto-advance if correctness is at least 80% and user explicitly types 'next' or 'continue'
-            feedback_lower = feedback.lower()
             is_sufficiently_correct = correctness_percentage >= 80
             if is_sufficiently_correct and user_clean in ["next", "continue"] and self.current_q < len(self.quiz_data) - 1:
                 encouragement = "🌟 Great job! " if correctness_percentage > 95 else "👍 Well done! "

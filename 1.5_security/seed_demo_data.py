@@ -4,8 +4,10 @@
 #
 #   python 1.5_security/seed_demo_data.py
 #
-# Safe to run more than once - accounts are overwritten, the quiz doc is
-# just re-set with the same content.
+# DEMO ONLY. The passwords below are fixed and public (they're right here in
+# the repo) - never run this against a real/production database, only a
+# throwaway or demo one. Safe to run more than once - accounts are
+# overwritten, the quiz doc is just re-set with the same content.
 
 from __future__ import annotations
 
@@ -14,8 +16,10 @@ from firebase_admin import firestore
 
 from create_account import create_account
 
-DEMO_TEACHER = ("demo_teacher", "demo-teacher-pass1")
-DEMO_STUDENT = ("demo_student", "demo-student-pass1")
+# No underscores - usernames are matched by prefix elsewhere (student_performance
+# doc IDs), so "demo_student" would prefix-match "demo_student_anything_else".
+DEMO_TEACHER = ("demoteacher", "demo-teacher-pass1")
+DEMO_STUDENT = ("demostudent", "demo-student-pass1")
 
 DEMO_SUBJECT = "DemoSubject"
 DEMO_WEEK = "Week1"

@@ -1,8 +1,6 @@
 from pathlib import Path
 from typing import List, Tuple
-import os
 import json
-from datetime import datetime
 
 from langchain_community.vectorstores import FAISS
 from .document_loader import LocalHuggingFaceEmbeddings

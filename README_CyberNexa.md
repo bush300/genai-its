@@ -131,6 +131,11 @@ export GOOGLE_APPLICATION_CREDENTIALS=path/to/service-account.json
 
 Pass `--overwrite` to replace an existing account (e.g. to reset a password).
 
+Usernames must be letters/digits only (no underscores, spaces, etc.) -
+student_performance records are looked up by prefix-matching the username,
+so a username containing a separator character could match another
+student's records.
+
 A student's account `username` is also their student ID: it is bound to the
 login automatically and cannot be changed by the student, so one student
 cannot view or edit another student's quiz progress.

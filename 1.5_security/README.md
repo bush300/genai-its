@@ -253,7 +253,9 @@ of closing out the project's security coverage:
 - **`firestore.rules`** (repo root) denies all direct client reads/writes.
   Everything in this app goes through the Streamlit backend over the
   Firebase Admin SDK, which bypasses these rules anyway - this is a backstop
-  in case a client key ever ends up somewhere it shouldn't.
+  in case a client key ever ends up somewhere it shouldn't. **Not deployed
+  yet** - rules only take effect after `firebase deploy --only firestore:rules`
+  (with a `firebase.json` pointing at this file), which hasn't been set up.
 - **`docs/data_flow.md`** - a short diagram of what data goes where, and
   what's masked before it reaches a cloud LLM provider.
 - **DP4 red-team tests** (`tests/test_dp4_redteam.py`) cover the three
