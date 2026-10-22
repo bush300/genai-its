@@ -24,10 +24,9 @@ data/
                 └── vectorstore/…      ← vectors for the quiz PDF
 """
 
-import os
 from pathlib import Path
 import json
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from langchain_community.vectorstores import FAISS
 from .document_loader import LocalHuggingFaceEmbeddings  # already defined
 

@@ -1,18 +1,8 @@
 """Tests for LLM daily cost-budget governance."""
 
-import sys
-from pathlib import Path
-
 import pytest
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SECURITY_DIR = PROJECT_ROOT / "1.5_security"
-
-if str(SECURITY_DIR) not in sys.path:
-    sys.path.insert(0, str(SECURITY_DIR))
-
-from rate_limiter import (  # noqa: E402
+from rate_limiter import (
     DailyBudgetExceeded,
     GovernanceConfig,
     GovernedLLM,

@@ -12,17 +12,11 @@ These tests verify that the audit logger:
 """
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
-# Allow importing from 1.5_security even though the folder name starts with a number.
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SECURITY_DIR = PROJECT_ROOT / "1.5_security"
-sys.path.insert(0, str(SECURITY_DIR))
-
-from audit_logger import AuditLogger, AuditEvent  # noqa: E402
+from audit_logger import AuditLogger, AuditEvent
 
 
 def read_jsonl(log_file_path: Path):

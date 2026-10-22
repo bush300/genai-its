@@ -17,7 +17,7 @@ The GenAI Quiz System is a robust, multi-user platform designed to facilitate in
 ---
 
 ## Getting Started
-1. **Login**: Students and teachers/tutors can log in using the dropdown menu to select their ID. New users can register by selecting the "Add new student" or "Add new teacher" option.
+1. **Login**: Students and teachers/tutors log in with a username and password. Accounts are created in advance by an administrator (see `README_CyberNexa.md`, section "Create User Accounts") - there is no self-service dropdown or sign-up form.
 2. **Subject Selection**: After logging in, select the subject you wish to interact with.
 3. **Navigation**: Use the sidebar to navigate between quizzes and chat (for teachers/tutors only).
 
@@ -27,12 +27,12 @@ The GenAI Quiz System is a robust, multi-user platform designed to facilitate in
 
 ### Scenario 1: Taking a Quiz
 1. **Login**:
-   - Select your student ID from the dropdown menu.
-   - If you are a new student, click "Add new student" and follow the registration steps.
-   - *[Insert Screenshot: Student Login Dropdown]*
+   - Enter the username and password given to you by your teacher/administrator and select "Student".
+   - Your student ID is your username - it's assigned at login automatically, there is no separate ID to pick.
+   - *[Insert Screenshot: Student Login Screen]*
 
 2. **Subject Selection**:
-   - Choose the subject for which you want to take a quiz.
+   - Choose the subject for which you want to take a quiz. Only quizzes a teacher has approved (published) appear in this list; a quiz your teacher is still preparing will not show up yet.
    - *[Insert Screenshot: Subject Selection Screen]*
 
 3. **Pre-Quiz Survey**:
@@ -57,29 +57,31 @@ The GenAI Quiz System is a robust, multi-user platform designed to facilitate in
 
 ### Scenario 2: Managing Quizzes and Student Performance
 1. **Login**:
-   - Select your teacher/tutor ID from the dropdown menu.
-   - If you are a new teacher, click "Add new teacher" and follow the registration steps.
-   - *[Insert Screenshot: Teacher Login Dropdown]*
+   - Enter your username and password and select "Teacher". Accounts are created in advance by an administrator; there is no self-service registration.
+   - *[Insert Screenshot: Teacher Login Screen]*
 
 2. **Subject and Quiz Management**:
-   - Navigate to the "Manage Quizzes" section from the sidebar.
-   - Upload new quiz materials (PDFs) or edit existing quizzes.
+   - Navigate to the "Teacher Hub" to upload new quiz materials (PDFs) or edit existing quizzes.
+   - A newly uploaded quiz is saved as a **Draft** and is not visible to students yet. Open it under "Select Existing Quiz" and click **Approve** to publish it - this is the point students will be able to see and take it.
    - *[Insert Screenshot: Manage Quizzes Screen]*
 
-3. **Monitoring Student Performance**:
+3. **Security Events**:
+   - The "Security Events" page (Teacher Hub → Security Events) shows blocked prompt-injection attempts and other audit events. It is restricted to Teacher accounts.
+
+4. **Monitoring Student Performance**:
    - Access the "Performance Dashboard" to view individual and class-wide performance metrics.
    - Filter results by student, subject, or week.
    - *[Insert Screenshot: Performance Dashboard Screen]*
 
-4. **Providing Feedback**:
+5. **Providing Feedback**:
    - Use the chat feature to provide personalized feedback to students.
    - *[Insert Screenshot: Chat Feedback Screen]*
 
 ---
 
 ## FAQs
-1. **What if I forget my ID?**
-   - Contact your teacher/tutor to retrieve your ID.
+1. **What if I forget my username or password?**
+   - Contact your teacher/administrator; they can reset your account.
 2. **Can I retake a quiz?**
    - Yes, but pre- and post-quiz surveys will not be shown again.
 3. **How is my data stored?**
@@ -89,10 +91,11 @@ The GenAI Quiz System is a robust, multi-user platform designed to facilitate in
 
 ## Troubleshooting
 1. **Login Issues**:
-   - Ensure you select the correct ID from the dropdown.
-   - For new registrations, double-check the format of your ID.
+   - Double-check your username, password and role (Student/Teacher).
+   - If your input seems blocked unexpectedly, you'll see a message that it was blocked; the details go to the teacher's audit log rather than being shown to you.
 2. **Quiz Not Loading**:
    - Check your internet connection.
+   - If a quiz you expect to see is missing, it may still be in Draft - ask your teacher to approve it.
    - Contact your teacher/tutor if the issue persists.
 3. **Performance Dashboard Not Updating**:
    - Refresh the page or log out and log back in.

@@ -6,16 +6,9 @@ live Firebase project and do not require service-account credentials.
 """
 
 import json
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SECURITY_MODULE_PATH = PROJECT_ROOT / "1.5_security"
-
-sys.path.insert(0, str(SECURITY_MODULE_PATH))
-
-from audit_logger import AuditLogger  # noqa: E402
+from audit_logger import AuditLogger
 
 
 def test_injected_firestore_client_enables_firestore(tmp_path):

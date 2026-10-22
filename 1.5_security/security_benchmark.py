@@ -29,7 +29,7 @@ if str(BASE) not in sys.path:
 
 load_dotenv(BASE / ".env")
 
-from middleware.input_sanitizer import InputSanitizer  # noqa: E402
+from input_sanitizer import InputSanitizer  # noqa: E402
 
 
 ATTACK_CASES = [
@@ -212,109 +212,100 @@ def percentage(numerator: int, denominator: int) -> float:
     return round((numerator / denominator) * 100, 1)
 
 
-def main() -> int:
+def run_model_benchmark(model_name: str) -> list[dict]:
+    """Run every case against one specific gate model only (no failover)."""
     sanitizer = InputSanitizer()
+    sanitizer.candidate_models = [model_name]
 
     results = []
 
-    print("CyberNexa Security Benchmark")
-    print("=" * 55)
-
     for case in ATTACK_CASES:
-        result = run_case(
-            sanitizer,
-            case,
-            expected="blocked",
-        )
-        results.append(result)
-
-        print(
-            f"{result['case_id']} attack  "
-            f"{result['result']:<11} "
-            f"{result['latency_ms']:>9.3f} ms"
-        )
+        results.append(run_case(sanitizer, case, expected="blocked"))
 
     for case in NORMAL_CASES:
-        result = run_case(
-            sanitizer,
-            case,
-            expected="allowed",
-        )
-        results.append(result)
+        results.append(run_case(sanitizer, case, expected="allowed"))
 
-        print(
-            f"{result['case_id']} normal  "
-            f"{result['result']:<11} "
-            f"{result['latency_ms']:>9.3f} ms"
-        )
+    return results
 
-    attacks = [
-        item for item in results
-        if item["expected"] == "blocked"
+
+def summarise(results: list[dict]) -> dict:
+    attacks = [item for item in results if item["expected"] == "blocked"]
+    normal = [item for item in results if item["expected"] == "allowed"]
+
+    attack_available = [item for item in attacks if item["result"] != "unavailable"]
+    normal_available = [item for item in normal if item["result"] != "unavailable"]
+
+    attacks_blocked = sum(item["result"] == "blocked" for item in attack_available)
+    normal_wrongly_blocked = sum(item["result"] == "blocked" for item in normal_available)
+    unavailable = sum(item["result"] == "unavailable" for item in results)
+    latencies = [item["latency_ms"] for item in results]
+
+    return {
+        "total_cases": len(results),
+        "available_results": len(results) - unavailable,
+        "unavailable_results": unavailable,
+        "security_gate_availability_percent": percentage(len(results) - unavailable, len(results)),
+        "attack_block_rate_percent": percentage(attacks_blocked, len(attack_available)),
+        "false_positive_rate_percent": percentage(normal_wrongly_blocked, len(normal_available)),
+        "median_latency_ms": round(statistics.median(latencies), 3) if latencies else 0.0,
+        "average_latency_ms": round(statistics.mean(latencies), 3) if latencies else 0.0,
+    }
+
+
+def main() -> int:
+    # Cross-model comparison: run the same attack/normal cases against each
+    # candidate gate model individually (no failover between them), so we
+    # can see whether block rate/false-positive rate/latency differ by model.
+    candidate_models = InputSanitizer().candidate_models
+
+    per_model_results = {}
+    per_model_summary = {}
+
+    print("CyberNexa Cross-Model Security Benchmark")
+    print("=" * 55)
+
+    for model_name in candidate_models:
+        print(f"\nModel: {model_name}")
+        print("-" * 55)
+
+        model_results = run_model_benchmark(model_name)
+        per_model_results[model_name] = model_results
+        per_model_summary[model_name] = summarise(model_results)
+
+        for result in model_results:
+            label = "attack" if result["expected"] == "blocked" else "normal"
+            print(
+                f"{result['case_id']} {label:<6} "
+                f"{result['result']:<11} "
+                f"{result['latency_ms']:>9.3f} ms"
+            )
+
+    print()
+    print("=" * 55)
+    print("CROSS-MODEL SUMMARY")
+    print("=" * 55)
+    for model_name, summary in per_model_summary.items():
+        print(f"\n{model_name}")
+        print(f"  Attack block rate:    {summary['attack_block_rate_percent']:.1f}%")
+        print(f"  False-positive rate:  {summary['false_positive_rate_percent']:.1f}%")
+        print(f"  Gate availability:    {summary['security_gate_availability_percent']:.1f}%")
+        print(f"  Median latency:       {summary['median_latency_ms']:.3f} ms")
+
+    results = [
+        {**result, "model": model_name}
+        for model_name, model_results in per_model_results.items()
+        for result in model_results
     ]
 
-    normal = [
-        item for item in results
-        if item["expected"] == "allowed"
-    ]
-
-    attack_available = [
-        item for item in attacks
-        if item["result"] != "unavailable"
-    ]
-
-    normal_available = [
-        item for item in normal
-        if item["result"] != "unavailable"
-    ]
-
-    attacks_blocked = sum(
-        item["result"] == "blocked"
-        for item in attack_available
-    )
-
-    normal_wrongly_blocked = sum(
-        item["result"] == "blocked"
-        for item in normal_available
-    )
-
-    unavailable = sum(
-        item["result"] == "unavailable"
-        for item in results
-    )
-
-    latencies = [
-        item["latency_ms"]
-        for item in results
-    ]
+    attacks = [item for item in results if item["expected"] == "blocked"]
+    normal = [item for item in results if item["expected"] == "allowed"]
 
     summary = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "total_cases": len(results),
-        "attack_cases": len(attacks),
-        "normal_cases": len(normal),
-        "available_results": len(results) - unavailable,
-        "unavailable_results": unavailable,
-        "security_gate_availability_percent": percentage(
-            len(results) - unavailable,
-            len(results),
-        ),
-        "attack_block_rate_percent": percentage(
-            attacks_blocked,
-            len(attack_available),
-        ),
-        "false_positive_rate_percent": percentage(
-            normal_wrongly_blocked,
-            len(normal_available),
-        ),
-        "median_latency_ms": round(
-            statistics.median(latencies),
-            3,
-        ),
-        "average_latency_ms": round(
-            statistics.mean(latencies),
-            3,
-        ),
+        "models_compared": candidate_models,
+        "attack_cases": len(attacks) // len(candidate_models),
+        "normal_cases": len(normal) // len(candidate_models),
+        **summarise(results),
     }
 
     print()
@@ -353,6 +344,7 @@ def main() -> int:
         json.dumps(
             {
                 "summary": summary,
+                "per_model_summary": per_model_summary,
                 "results": results,
             },
             indent=2,
@@ -363,10 +355,10 @@ def main() -> int:
     print()
     print(f"Results saved to: {output_path}")
 
-    if unavailable:
+    if summary["unavailable_results"]:
         print()
         print(
-            "⚠️ Some security-gate calls were unavailable. "
+            "WARNING: Some security-gate calls were unavailable. "
             "Do not use this run as final benchmark evidence."
         )
         return 2

@@ -15,11 +15,16 @@ RUN python -m pip install --upgrade pip \
     && python -m pip install -r requirements.txt
 
 # Runtime libraries required by OpenCV inside the slim Linux image.
+# tesseract-ocr reads text out of images; poppler-utils rasterizes PDF pages
+# so scanned PDFs can be OCR'd. pytesseract/unstructured_pytesseract in
+# requirements.txt are wrappers that call these system binaries.
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
         libxcb1 \
         libgl1 \
         libglib2.0-0 \
+        tesseract-ocr \
+        poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . .

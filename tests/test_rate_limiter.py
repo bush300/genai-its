@@ -1,22 +1,11 @@
 """Automated tests for the shared LLM request governor."""
 
 import asyncio
-from pathlib import Path
-import sys
 
 import pytest
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SECURITY_DIR = PROJECT_ROOT / "1.5_security"
-
-if str(SECURITY_DIR) not in sys.path:
-    sys.path.insert(0, str(SECURITY_DIR))
-
-
-import rate_limiter  # noqa: E402
-
-from rate_limiter import (  # noqa: E402
+import rate_limiter
+from rate_limiter import (
     DailyBudgetExceeded,
     GovernanceConfig,
     GovernedLLM,

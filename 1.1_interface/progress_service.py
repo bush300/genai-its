@@ -1,4 +1,15 @@
+# Primary contributor: Anthony
+
+import sys
+from pathlib import Path
+
 from firebase_admin import firestore
+
+BACK_END_DIR = Path(__file__).resolve().parents[1] / "1.2_back_end"
+if str(BACK_END_DIR) not in sys.path:
+    sys.path.insert(0, str(BACK_END_DIR))
+
+from student_records import belongs_to_student  # noqa: E402
 
 def get_quizzes_completed(student_id):
     db = firestore.client()
@@ -12,9 +23,7 @@ def get_quizzes_completed(student_id):
     docs = db.collection("student_performance").stream()
 
     for doc in docs:
-        doc_id = doc.id
-
-        if doc_id.startswith(student_id + "_"):
+        if belongs_to_student(doc.id, doc.to_dict() or {}, student_id):
             count += 1
 
     return count
@@ -30,10 +39,11 @@ def get_average_score(student_id):
     quiz_percentages = []
 
     for doc in docs:
-        if not doc.id.startswith(student_id + "_"):
+        data = doc.to_dict()
+
+        if not belongs_to_student(doc.id, data or {}, student_id):
             continue
 
-        data = doc.to_dict()
         answers = data.get("answers", {})
 
         if not answers:
@@ -79,10 +89,11 @@ def get_improvement_rate(student_id):
     improvements = []
 
     for doc in docs:
-        if not doc.id.startswith(student_id + "_"):
+        data = doc.to_dict()
+
+        if not belongs_to_student(doc.id, data or {}, student_id):
             continue
 
-        data = doc.to_dict()
         answers = data.get("answers", {})
 
         for attempts in answers.values():

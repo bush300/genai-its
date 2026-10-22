@@ -1,3 +1,5 @@
+# Author: Ronan Conroy
+
 import os
 import json
 import random
@@ -11,6 +13,17 @@ from google.genai import types
 # High-entropy marker injected into the AI's system context; if it ever appears in
 # an AI response, the model was tricked into leaking its own context/instructions.
 CANARY_TOKEN = "[CANARY_8f9a21b_SECRET_DO_NOT_PRINT]"
+
+# Cap on answer length before it hits the gate - keeps gate calls cheap and
+# stops someone burying an instruction in a wall of text.
+MAX_INPUT_CHARS = 4000
+
+
+def cap_input_length(user_prompt: str, max_chars: int = MAX_INPUT_CHARS) -> Tuple[str, bool]:
+    """Trim input down to max_chars. Returns (prompt, was_truncated)."""
+    if len(user_prompt) <= max_chars:
+        return user_prompt, False
+    return user_prompt[:max_chars], True
 
 
 def contains_canary_leak(ai_response: str) -> bool:
@@ -43,11 +56,14 @@ class InputSanitizer:
     def __init__(self, api_key: str = None):
         """Initializes the Secondary LLM Gate using the Google GenAI SDK."""
         self.client = genai.Client(api_key=api_key or os.getenv("GOOGLE_API_KEY"))
-        # Active candidate models from your dashboard ordered by quota availability
+        # Active candidate models from your dashboard ordered by quota availability.
+        # gemini-2.5-flash was retired (API now returns 404, telling callers to
+        # move to gemini-3.8-flash) - confirmed via the cross-model benchmark,
+        # see 1.5_security/security_benchmark.py.
         self.candidate_models = [
             "gemini-3.5-flash-lite",
             "gemini-3.6-flash",
-            "gemini-2.5-flash"
+            "gemini-3.8-flash"
         ]
 
     def check_secondary_gate(self, user_prompt: str) -> Tuple[bool, str]:

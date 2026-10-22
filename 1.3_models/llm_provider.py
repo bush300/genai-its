@@ -1,5 +1,7 @@
 """Configuration-driven LLM provider factory.
 
+Author: Saad
+
 Supported providers:
 - Ollama for local execution
 - Groq for cloud execution

@@ -9,13 +9,10 @@ from pathlib import Path
 import pytest
 
 
+import llm_provider
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODELS_DIR = PROJECT_ROOT / "1.3_models"
-
-if str(MODELS_DIR) not in sys.path:
-    sys.path.insert(0, str(MODELS_DIR))
-
-import llm_provider  # noqa: E402
 
 
 def test_default_provider_is_groq(monkeypatch: pytest.MonkeyPatch) -> None:

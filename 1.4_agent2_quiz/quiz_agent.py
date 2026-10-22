@@ -1,9 +1,11 @@
+# Author: Tahmid Abrar
+
 import os
-import json
+import re
 import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, firestore
-from middleware.input_sanitizer import CANARY_TOKEN
+from input_sanitizer import CANARY_TOKEN
 
 # Initialize Firebase only once
 if not firebase_admin._apps:
@@ -11,12 +13,12 @@ if not firebase_admin._apps:
     firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-def get_groq_llm(model_name=None, temperature=None):
+def get_groq_llm(model_name=None, temperature=None, caller_id="global"):
     # Loads model and temperature from .env, with agent-specific overrides
     from llm_provider import get_llm
     model = model_name or os.getenv("QUIZ_AGENT_MODEL", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"))
     temp = float(temperature if temperature is not None else os.getenv("QUIZ_AGENT_TEMPERATURE", os.getenv("GROQ_TEMPERATURE", "0.0")))
-    return get_llm(model_name=model, temperature=temp)
+    return get_llm(model_name=model, temperature=temp, caller_id=caller_id)
 
 class QuizAgent:
     def __init__(self, quiz_data, subject, week, student_id, profile):
@@ -30,7 +32,8 @@ class QuizAgent:
         self.current_q = self.performance.get("current_q", 0)
         self.started = self.performance.get("started", False)
         self.instructions_given = self.performance.get("instructions_given", False)
-        self.llm = get_groq_llm()
+        # Per-student caller_id so rate/budget limits don't pool all students together.
+        self.llm = get_groq_llm(caller_id=self.student_id)
 
     def load_performance(self):
         doc_ref = db.document(self.firestore_doc)
@@ -42,10 +45,16 @@ class QuizAgent:
                 "answers": {},  # {q_id: [{"attempt": n, "answer": str, "feedback": str, "score": float}]}
                 "current_q": 0,
                 "started": False,
-                "instructions_given": False
+                "instructions_given": False,
+                "student_id": self.student_id,
             }
 
     def save_performance(self):
+        # Store student_id on the record itself rather than relying on parsing
+        # it back out of the document ID - that parsing (see
+        # load_student_performance in streamlit_app.py) splits on "_", which
+        # breaks for any student_id that itself contains an underscore.
+        self.performance["student_id"] = self.student_id
         db.document(self.firestore_doc).set(self.performance)
 
     def get_instructions(self):
@@ -142,7 +151,27 @@ class QuizAgent:
         return ""
 
     def evaluate_answer(self, answer, question):
+        
+
+        feedback_requests = [
+            "give me some feedback",
+            "can you give me feedback",
+            "can you give me some feedback",
+            "give me feedback",
+            "provide feedback",
+        ]
+
+        normalised_answer = answer.strip().lower()
+
+        if any(request in normalised_answer for request in feedback_requests):
+            return True, None, (
+                "I'd be happy to help! First, try answering the question "
+                "in your own words. I'll then give you feedback to help "
+                "you improve your answer."
+            )
+
         rubric = question.get("answer", "")
+
         # Attempt RAG retrieval for this subject/week. Falls back to existing KB blob if retrieval is unavailable.
         retrieved_section = ""
         try:
@@ -199,6 +228,9 @@ class QuizAgent:
             "- If the answer is incorrect, start your reply with a clear statement like 'Incorrect:' or 'Your answer is not correct because...' and then briefly explain why.\n"
             "- Do NOT explain your own steps or what you are doing. Do NOT mention the rubric, criteria, or that you are assessing.\n"
             "- Be concise, professional, and humanlike.\n"
+            "- If the student asks for feedback but has not provided an answer attempt, do not reveal the expected answer, marking rubric, or a list of points to include.\n"
+            "- Instead, briefly ask the student to attempt the question first, optionally offering a small hint that does not reveal the answer.\n"
+            "- A request such as 'can you give me some feedback' without an answer attempt is not itself an answer attempt.\n"
             "- If the input is a question or exploration (e.g., starts with 'how', 'why', 'what', or ends with '?'), respond in a helpful, detailed way; you may consult the web to provide the best answer if required, but do not mention your own process.\n"
             "- Always relate your explanation or example to cybersecurity concepts, best practices, or real-world scenarios where possible.\n"
             "- If the answer is correct, you may offer a brief extension or related insight (preferably with a cybersecurity angle), but do not state 'next question' or similar.\n"
@@ -207,19 +239,122 @@ class QuizAgent:
             "- Do not mention scores, rubrics, or evaluation steps in your feedback.\n"
             "At the end, in a new line, write: SCORE: 1.0 if the answer is correct or mostly correct, or SCORE: 0.0 if not. If the input is a question or exploration, write SCORE: X (where X is the last valid score for this question, or 0.0 if not available).\n"
         )
-        eval_llm = get_groq_llm()
+        eval_llm = get_groq_llm(caller_id=self.student_id)
         response = eval_llm.invoke([{"role": "system", "content": prompt}]).content.strip()
+        
+        # Validate output before it can be returned to the student.
+        from output_guardrails import check_output
+
+        q_id = str(question.get("id", self.current_q + 1))
+
+        answers = self.performance.get("answers", {})
+        previous_attempts = answers.get(q_id, [])
+        if not isinstance(previous_attempts, list):
+            previous_attempts = []
+
+        # Count only scored, non-exploration attempts.
+        scored_attempts = [
+            attempt for attempt in previous_attempts
+            if isinstance(attempt, dict)
+            and not attempt.get("exploration", False)
+            and attempt.get("score") is not None
+        ]
+
+        attempt_number = len(scored_attempts) + 1
+
+        # Retrieve the most recent valid score for this question only.
+        previous_score = next(
+            (
+                float(attempt["score"])
+                for attempt in reversed(scored_attempts)
+                if isinstance(attempt.get("score"), (int, float))
+                and 0.0 <= float(attempt["score"]) <= 1.0
+            ),
+            None,
+        )
+
+        guardrail_result = check_output(
+            response,
+            rubric=rubric,
+            attempt_number=attempt_number,
+            rubric_provided=bool(rubric.strip()),
+        )
+        response = guardrail_result.get("response", response)
+
+        # A blocked response must never be treated as a genuine zero score.
+        if guardrail_result.get("action") == "block":
+            return True, None, (
+                "I couldn't safely validate the feedback this time. "
+                "Please try submitting your answer again."
+            )
+
+        # Require exactly one score line, and require it to be the final line.
         lines = response.splitlines()
-        score = 0.0
-        for line in reversed(lines):
-            if line.strip().startswith("SCORE:"):
-                try:
-                    score = float(line.split(":", 1)[1].strip())
-                except ValueError:
-                    score = 0.0
-                break
-        feedback = "\n".join([l for l in lines if not l.strip().startswith("SCORE:")]).strip()
+
+        score_lines = [
+            (index, line)
+            for index, line in enumerate(lines)
+            if re.match(r"^\s*SCORE\s*:", line, re.IGNORECASE)
+        ]
+
+        if len(score_lines) != 1:
+            return True, None, (
+                "I couldn't validate the evaluation format. "
+                "Please try submitting your answer again."
+            )
+
+        score_index, score_line = score_lines[0]
+
+        if score_index != len(lines) - 1:
+            return True, None, (
+                "I couldn't validate the evaluation format. "
+                "Please try submitting your answer again."
+            )
+
+        score_match = re.match(
+            r"^\s*SCORE\s*:\s*(X|(?:\d+(?:\.\d*)?|\.\d+))\s*$",
+            score_line,
+            re.IGNORECASE,
+        )
+
+        if not score_match:
+            return True, None, (
+                "I couldn't validate the evaluation format. "
+                "Please try submitting your answer again."
+            )
+
+        score_text = score_match.group(1).upper()
+
+        if score_text == "X":
+            if previous_score is None:
+                return True, None, (
+                    "I couldn't determine a previous score for this question. "
+                    "Please try answering the quiz question first."
+                )
+            score = previous_score
+        else:
+            try:
+                score = float(score_text)
+            except ValueError:
+                return True, None, (
+                    "I couldn't validate the score. "
+                    "Please try submitting your answer again."
+                )
+
+            if not 0.0 <= score <= 1.0:
+                return True, None, (
+                    "I couldn't validate the score. "
+                    "Please try submitting your answer again."
+                )
+
+        # Remove the score line from student-facing feedback.
+        feedback = "\n".join(
+            line for line in lines
+            if not re.match(r"^\s*SCORE\s*:", line, re.IGNORECASE)
+        ).strip()
+
         return True, score, feedback
+
 
     def handle_input(self, user_input, chat_history):
         user_clean = user_input.strip().lower()
@@ -245,14 +380,44 @@ class QuizAgent:
 
         q = self.quiz_data[self.current_q]
         q_id = str(q["id"])
+        
+        # Handle feedback requests before classifying or recording an answer
+        feedback_requests = [
+            "give me some feedback",
+            "can you give me feedback",
+            "can you give me some feedback",
+            "could you give me feedback",
+            "could you give me some feedback",
+            "give me feedback",
+            "provide feedback",
+            "feedback on my answer",
+            "can i get feedback",
+            "could i get feedback",
+        ]
+
+        normalised_input = user_input.strip().lower()
+
+        if any(request in normalised_input for request in feedback_requests):
+            return (
+                "I'd be happy to help! First, try answering the question "
+                "in your own words. I'll then give you feedback to help "
+                "you improve your answer.",
+                False,
+            )
+
         continue_phrases = ["next", "continue", "yes", "ready", "okay", "yep"]
         if user_clean in continue_phrases:
             # Only allow continue if last answer was above a minimum threshold
-            last_score = self.performance.get("last_score", 0.0)
-            try:
-                last_score = float(last_score)
-            except Exception:
-                last_score = 0.0
+            last_score = 0.0
+
+            # Only use a score earned on the current question.
+            if self.performance.get("last_qid") == q_id:
+                try:
+                    last_score = float(
+                    self.performance.get("last_score", 0.0)
+                    )
+                except (TypeError, ValueError):
+                    last_score = 0.0
             if last_score >= 0.5:
                 # Only allow moving to next question if not on last
                 if self.current_q >= len(self.quiz_data) - 1:
@@ -274,7 +439,11 @@ class QuizAgent:
         is_question = user_input.strip().endswith("?") or user_input.strip().lower().startswith(("how", "why", "what", "can", "does", "do", "is", "are", "could", "would", "should"))
         if user_input.strip() and not is_question:
             relevant, score, feedback = self.evaluate_answer(user_input, q)
-            # Store the attempt
+
+            if score is None:
+                return feedback, False
+
+            # Store the attempt only if evaluation returned a valid score.
             attempts = self.performance["answers"].setdefault(q_id, [])
             attempts.append({
                 "attempt": len(attempts) + 1,
@@ -284,22 +453,8 @@ class QuizAgent:
             })
             # Store last valid score and qid for continue logic
             self.performance["last_score"] = score
-            self.performance["last_qid"] = str(self.current_q + 1)
+            self.performance["last_qid"] = q_id
             self.save_performance()
-            # Ensure score is float for comparison
-            try:
-                score_float = float(score)
-            except Exception:
-                score_float = 0.0
-            # Only auto-advance if score is 1.0 and feedback explicitly confirms correctness
-            feedback_lower = feedback.lower()
-            is_clearly_correct = (
-                score_float == 1.0 and (
-                    "correct:" in feedback_lower or 
-                    "great job!" in feedback_lower or 
-                    "your answer is correct because" in feedback_lower
-                ) and "incorrect:" not in feedback_lower
-            )
             # Ensure question is passed correctly
             q = self.quiz_data[self.current_q]  # Fetch the current question
             rubric = q.get("answer", "")  # Ensure rubric is fetched from the question
@@ -309,7 +464,6 @@ class QuizAgent:
             correctness_percentage = (satisfied_criteria / total_criteria) * 100 if total_criteria > 0 else 0
 
             # Only auto-advance if correctness is at least 80% and user explicitly types 'next' or 'continue'
-            feedback_lower = feedback.lower()
             is_sufficiently_correct = correctness_percentage >= 80
             if is_sufficiently_correct and user_clean in ["next", "continue"] and self.current_q < len(self.quiz_data) - 1:
                 encouragement = "🌟 Great job! " if correctness_percentage > 95 else "👍 Well done! "
@@ -334,7 +488,15 @@ class QuizAgent:
         # If the input is a question or exploration, answer but do NOT advance
         if is_question:
             relevant, score, feedback = self.evaluate_answer(user_input, q)
-            # Store the attempt as an exploration
+
+            if score is None:
+                return (
+                    f"{feedback}\n\nYou can try answering the quiz question "
+                    "when you're ready.",
+                    False,
+                )
+
+            # Store the exploration only when it has a valid score.
             attempts = self.performance["answers"].setdefault(q_id, [])
             attempts.append({
                 "attempt": len(attempts) + 1,
