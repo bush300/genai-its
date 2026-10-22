@@ -225,14 +225,25 @@ def save_quiz_to_firestore(subject, week, questions, status=None):
         "status": resolved_status
     })
 
-def load_quiz_from_firestore(subject, week):
+def load_quiz_from_firestore(subject, week, published_only=False):
+    #Load quiz questions, optionally enforcing the student publication gate.
     doc_id = f"{subject}_{week}"
     doc = db.collection("finalised_quizzes").document(doc_id).get()
     if doc.exists:
-        return doc.to_dict().get("questions", [])
-    else:
-        return []
+        data = doc.to_dict() or {}
+        if published_only and data.get("status") != "published":
+            return []
+        return data.get("questions", [])
+    return []
 
+def publish_quiz_in_firestore(subject, week):
+    doc_id = f"{subject}_{week}"
+
+    db.collection("finalised_quizzes").document(doc_id).update({
+        "status": "published"
+    })
+
+    
 # Add functionality for uploading and managing knowledgebase files
 
 # Function to save knowledgebase to Firebase
@@ -991,9 +1002,15 @@ if st.session_state.page == 'teacher':
                         "context": new_context,
                         "answer": new_rubric,
                     })
+    
             if st.button("Save All Changes"):
                 save_quiz_to_firestore(subject, week, edited_questions)
-                st.success(f"Saved edited quiz to Firestore for {subject} / {week}")
+                st.success(f"Saved edited quiz to Firestore for {subject} / {week}, please approve to publish.")
+
+            if st.button("Approve & Publish Quiz"):
+                publish_quiz_in_firestore(subject, week)
+                st.success(f"Quiz published for {subject} / {week}")
+                st.rerun()
         else:
             st.info("Select a subject and week with an existing quiz to view or edit questions.")
     # Resolve `subject` and `week` safely from local scope or session state
@@ -1083,6 +1100,8 @@ if st.session_state.page == 'teacher':
                             "answer": new_rubric
                         })
                 # If no expanders are opened, still save the current questions
+                
+                
                 if not edited_questions:
                     edited_questions = st.session_state.uploaded_questions
                 if st.button("Save Quiz"):
@@ -1828,7 +1847,7 @@ Select a subject and week to begin or continue your quiz.
     set_query_params()
 
     quiz_data = (
-        load_quiz_from_firestore(subject, week)
+        load_quiz_from_firestore(subject, week, published_only=True)
         if subject and week
         else []
     )
