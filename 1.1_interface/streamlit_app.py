@@ -216,17 +216,30 @@ def save_quiz_to_firestore(subject, week, questions):
     db.collection("finalised_quizzes").document(doc_id).set({
         "subject": subject,
         "week": week,
-        "questions": questions
+        "questions": questions,
+        "status": "draft",
+        #Save quiz content as a draft; teachers must explicitly publish it.
     })
 
-def load_quiz_from_firestore(subject, week):
+def load_quiz_from_firestore(subject, week, published_only=False):
+    #Load quiz questions, optionally enforcing the student publication gate.
     doc_id = f"{subject}_{week}"
     doc = db.collection("finalised_quizzes").document(doc_id).get()
     if doc.exists:
-        return doc.to_dict().get("questions", [])
-    else:
-        return []
+        data = doc.to_dict() or {}
+        if published_only and data.get("status") != "published":
+            return []
+        return data.get("questions", [])
+    return []
 
+def publish_quiz_in_firestore(subject, week):
+    doc_id = f"{subject}_{week}"
+
+    db.collection("finalised_quizzes").document(doc_id).update({
+        "status": "published"
+    })
+
+    
 # Add functionality for uploading and managing knowledgebase files
 
 # Function to save knowledgebase to Firebase
@@ -963,9 +976,15 @@ if st.session_state.page == 'teacher':
                         "context": new_context,
                         "answer": new_rubric,
                     })
+    
             if st.button("Save All Changes"):
                 save_quiz_to_firestore(subject, week, edited_questions)
-                st.success(f"Saved edited quiz to Firestore for {subject} / {week}")
+                st.success(f"Saved edited quiz to Firestore for {subject} / {week}, please approve to publish.")
+
+            if st.button("Approve & Publish Quiz"):
+                publish_quiz_in_firestore(subject, week)
+                st.success(f"Quiz published for {subject} / {week}")
+                st.rerun()
         else:
             st.info("Select a subject and week with an existing quiz to view or edit questions.")
     # Resolve `subject` and `week` safely from local scope or session state
@@ -1055,11 +1074,23 @@ if st.session_state.page == 'teacher':
                             "answer": new_rubric
                         })
                 # If no expanders are opened, still save the current questions
+                
+                
                 if not edited_questions:
                     edited_questions = st.session_state.uploaded_questions
-                if st.button("Save Quiz"):
-                    save_quiz_to_firestore(new_subject, new_week, edited_questions)
-                    st.success(f"Quiz saved to Firestore for {new_subject} / {new_week}. It is now available to students.")
+
+                save_col1, save_col2 = st.columns(2)
+                with save_col1:
+                    if st.button("Save Draft", use_container_width=True):
+                        save_quiz_to_firestore(new_subject, new_week, edited_questions)
+                        st.success(f"Saved draft quiz to Firestore for {new_subject} / {new_week}.")
+
+                with save_col2:
+                    if st.button("Save & Approve", use_container_width=True):
+                        save_quiz_to_firestore(new_subject, new_week, edited_questions)
+                        publish_quiz_in_firestore(new_subject, new_week)
+                        st.success(f"Quiz saved and published for {new_subject} / {new_week}.")
+                
 elif st.session_state.page == 'teacher_analytics':
     require_role("Teacher")
     st.sidebar.empty()
@@ -1611,7 +1642,7 @@ elif st.session_state.page == 'student_subject_select':
     subjects = []
     for doc in db.collection("finalised_quizzes").stream():
         data = doc.to_dict()
-        if data and "subject" in data:
+        if data and data.get("status") == "published" and "subject" in data:
             subjects.append(data["subject"])
 
     subjects = sorted(set(subjects))
@@ -1824,7 +1855,11 @@ Select a subject and week to begin or continue your quiz.
         for doc in db.collection("finalised_quizzes").stream():
             data = doc.to_dict()
 
-            if data and data.get("subject") == subject:
+            if (
+                data
+                and data.get("subject") == subject
+                and data.get("status", "").strip().lower() == "published"
+            ):
                 selected_week = data.get("week")
 
                 if selected_week:
@@ -1855,7 +1890,7 @@ Select a subject and week to begin or continue your quiz.
     set_query_params()
 
     quiz_data = (
-        load_quiz_from_firestore(subject, week)
+        load_quiz_from_firestore(subject, week, published_only=True)
         if subject and week
         else []
     )
