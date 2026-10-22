@@ -443,12 +443,16 @@ CyberNexa includes governance controls around LLM usage, including:
   reaches the gate. The secondary gate **fails closed**: if every candidate
   Gemini model is unreachable, the input is treated as unsafe rather than let
   through.
-- output guardrails, running after every tutor reply:
+- output guardrails (`1.4_agent2_quiz/output_guardrails.py`), run on every
+  quiz evaluation before it reaches the student, logged to the audit log as
+  `output_guardrail_trigger` and failing closed (the feedback is blocked and
+  the student is asked to retry rather than shown a silent zero):
   - a canary-token check that detects the tutor leaking its own system
-    instructions, logged to the audit log as `output_guardrail_trigger`
-  - a rubric/answer-leak check (detecting the tutor's reply closely copying
-    the stored marking rubric/answer) is planned but not yet implemented -
-    `1.5_security/output_guardrail.py` is a placeholder pending that work
+    instructions
+  - a rubric/answer-leak check that flags phrasing lifted from the stored
+    marking rubric/answer, or a reply that echoes a student email/phone number
+  - a score-format check that rejects a missing, duplicated, out-of-range, or
+    feedback-contradicting SCORE line
 - a blocked-input banner that tells the student their input was blocked
   without repeating the detailed reason (the detail stays in the audit log,
   so a rejected prompt can't be used to learn how to refine the next attempt)

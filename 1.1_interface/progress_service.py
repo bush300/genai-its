@@ -1,6 +1,15 @@
+# Primary contributor: Anthony
+
+import sys
+from pathlib import Path
+
 from firebase_admin import firestore
 
-from student_records import belongs_to_student
+BACK_END_DIR = Path(__file__).resolve().parents[1] / "1.2_back_end"
+if str(BACK_END_DIR) not in sys.path:
+    sys.path.insert(0, str(BACK_END_DIR))
+
+from student_records import belongs_to_student  # noqa: E402
 
 def get_quizzes_completed(student_id):
     db = firestore.client()

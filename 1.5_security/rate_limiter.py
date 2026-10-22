@@ -1,5 +1,7 @@
 """In-memory request-rate, daily-budget and token-cost controls for LLM calls.
 
+Author: Saad
+
 This is intentionally lightweight for the A4 prototype. In a multi-server
 production system, counters should be moved to a shared store such as Redis
 or Firestore.

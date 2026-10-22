@@ -1,6 +1,8 @@
 # 1.4_agent2_quiz/quiz_extractor.py
 # ─────────────────────────────────────────────────────────────────────────
 """
+Author: Tahmid Abrar
+
 PDF → (question, context, answer-rubric) extractor
 ↳ OCR fallback now uses unstructured.partition.pdf with strategy="ocr_only".
 

@@ -1,3 +1,8 @@
+"""Output guardrails - Anthony Fen
+
+Validates a tutor/quiz-agent reply before it reaches the student: canary-leak,
+rubric/answer-leak, PII, and SCORE-line checks. Fails closed via `action`.
+"""
 
 from __future__ import annotations
 

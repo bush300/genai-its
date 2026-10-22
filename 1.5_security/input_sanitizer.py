@@ -1,3 +1,5 @@
+# Author: Ronan Conroy
+
 import os
 import json
 import random

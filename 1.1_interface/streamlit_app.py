@@ -1,3 +1,5 @@
+# Primary contributor: Bushra
+
 import os
 import json
 import streamlit as st
@@ -2240,9 +2242,9 @@ Type your answer below. The AI tutor will provide feedback and guide you to the 
                     )
                     st.stop()
 
-                # 5. rubric/answer leak check goes here once Anthony's
-                # output_guardrail.py is done - current_question above is
-                # ready for it
+                # 5. rubric/answer and score-format checks run inside
+                # QuizAgent.evaluate_answer via output_guardrails.check_output
+                # (1.4_agent2_quiz/output_guardrails.py).
 
             # Move to post-quiz survey when the quiz finishes
             if end_quiz == "qualtrics2":

@@ -3,13 +3,22 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import firebase_admin
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 QUIZ_AGENT_DIR = PROJECT_ROOT / "1.4_agent2_quiz"
 
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(QUIZ_AGENT_DIR))
 
-from quiz_agent import QuizAgent
+# quiz_agent.py initialises Firebase from st.secrets at import time. CI has
+# no secrets.toml (deliberately - that's what keeps real credentials out of
+# the repo), so importing it unmocked aborts test collection entirely.
+# Pretend an app is already initialised and stub out firestore.client() so
+# the import succeeds without real credentials.
+with patch.object(firebase_admin, "_apps", {"testing": MagicMock()}), \
+        patch("firebase_admin.firestore.client", return_value=MagicMock()):
+    from quiz_agent import QuizAgent
 
 
 def make_agent():

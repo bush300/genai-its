@@ -1,4 +1,7 @@
-"""Shared YAML configuration loader for LLM routing and governance."""
+"""Shared YAML configuration loader for LLM routing and governance.
+
+Author: Saad
+"""
 
 from __future__ import annotations
 
